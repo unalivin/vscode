@@ -18,6 +18,7 @@ import { IDefaultAccountService } from '../../../../../platform/defaultAccount/c
 import { IExtensionGalleryService, IExtensionManagementService } from '../../../../../platform/extensionManagement/common/extensionManagement.js';
 import { ILayoutService } from '../../../../../platform/layout/browser/layoutService.js';
 import { IWorkspaceTrustManagementService } from '../../../../../platform/workspace/common/workspaceTrust.js';
+import product from '../../../../../platform/product/common/product.js';
 import { ColorThemeData } from '../../../../services/themes/common/colorThemeData.js';
 import { IWorkbenchThemeService } from '../../../../services/themes/common/workbenchThemeService.js';
 import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
@@ -58,6 +59,14 @@ suite('OnboardingVariationA', () => {
 		const button = container.querySelector<HTMLElement>('[aria-label="Continue with GitHub Enterprise"]');
 		assert.ok(button);
 		button.click();
+	}
+
+	if (!product.defaultChatAgent) {
+		test('does not render Copilot onboarding without a configured default chat agent', () => {
+			const { container } = createOnboarding();
+			assert.strictEqual(container.querySelector('.onboarding-a-overlay'), null);
+		});
+		return;
 	}
 
 	test('onboarding keeps all provider choices and waits for shared setup completion', async () => {

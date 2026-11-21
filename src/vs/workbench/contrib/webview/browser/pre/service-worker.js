@@ -348,7 +348,9 @@ sw.addEventListener('message', async (event) => {
 
 sw.addEventListener('fetch', (event) => {
 	const requestUrl = new URL(event.request.url);
-	if (typeof resourceBaseAuthority === 'string' && requestUrl.protocol === 'https:' && requestUrl.hostname.endsWith('.' + resourceBaseAuthority)) {
+	const isWebviewResourceProtocol = requestUrl.protocol === 'https:'
+		|| (requestUrl.protocol === 'http:' && requestUrl.hostname.endsWith('.localhost'));
+	if (typeof resourceBaseAuthority === 'string' && isWebviewResourceProtocol && requestUrl.hostname.endsWith('.' + resourceBaseAuthority)) {
 		switch (event.request.method) {
 			case 'GET':
 			case 'HEAD': {

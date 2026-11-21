@@ -234,6 +234,10 @@ export class StartupPageRunnerContribution extends Disposable implements IWorkbe
 	}
 
 	private tryShowOnboarding(): void {
+		if (!this.productService.defaultChatAgent) {
+			return; // The Copilot onboarding flow is unavailable without a default chat agent.
+		}
+
 		if (this.environmentService.skipWelcome) {
 			return; // skip welcome flag is set
 		}

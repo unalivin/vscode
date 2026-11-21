@@ -48,7 +48,8 @@ import { GitHubPaths, IDefaultAccountService } from '../../../../../platform/def
 import product from '../../../../../platform/product/common/product.js';
 import { isCompletionsEnabled } from '../../../../../editor/common/services/completionsEnablement.js';
 
-const defaultChat = product.defaultChatAgent;
+// The status dashboard is only opened from ChatStatusBarEntry when a default chat agent is configured.
+const defaultChat = product.defaultChatAgent!;
 const completionsConfigurationTargets = [
 	ConfigurationTarget.WORKSPACE_FOLDER,
 	ConfigurationTarget.WORKSPACE,
@@ -141,7 +142,9 @@ export class ChatStatusDashboard extends DomWidget {
 	) {
 		super();
 
-		this.render();
+		if (product.defaultChatAgent) {
+			this.render();
+		}
 	}
 
 	private render(): void {

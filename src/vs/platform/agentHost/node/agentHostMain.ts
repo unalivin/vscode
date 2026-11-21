@@ -17,7 +17,7 @@ import * as os from 'os';
 import { writeSync } from 'fs';
 import { getHeapStatistics } from 'node:v8';
 import * as inspector from 'inspector';
-import { AgentHostClaudeAgentEnabledEnvVar, AgentHostCodexAgentCodexHomeEnvVar, AgentHostCodexAgentEnabledEnvVar, AgentHostIpcChannels, AgentHostMainProcessConnectionContext, IAgentHostInspectInfo, IAgentHostSocketInfo, IConnectionTrackerService, isAgentEnabled } from '../common/agentService.js';
+import { AgentHostClaudeAgentEnabledEnvVar, AgentHostCodexAgentCodexHomeEnvVar, AgentHostCodexAgentEnabledEnvVar, AgentHostIpcChannels, AgentHostMainProcessConnectionContext, IAgentHostInspectInfo, IAgentHostSocketInfo, IConnectionTrackerService, isAgentEnabled, isCopilotAgentConfigured } from '../common/agentService.js';
 import { AgentHostCodexEnabledConfigKey, platformRootSchema } from '../common/agentHostSchema.js';
 import { AGENT_HOST_ENDPOINT_REGISTRY_SCHEMA_VERSION, IAgentHostEndpointMetadata } from '../common/agentHostEndpointRegistry.js';
 import { PROTOCOL_VERSION } from '../common/state/protocol/version/registry.js';
@@ -240,7 +240,9 @@ async function startAgentHost(): Promise<void> {
 			}, heartbeat => parentPort.postMessage(toAgentHostHeartbeatMessage(heartbeat)), { heapLimitBytes: getHeapStatistics().heap_size_limit }));
 		}
 		markStartupPhase('providers');
-		providerService.registerProvider(instantiationService.createInstance(CopilotAgent));
+		if (isCopilotAgentConfigured(productService.defaultChatAgent)) {
+			providerService.registerProvider(instantiationService.createInstance(CopilotAgent));
+		}
 		// Claude and Codex providers are gated on two things:
 		//  1. The user-facing enable toggle (`chat.agentHost.<x>Agent.enabled`,
 		//     forwarded as an env var by the starters). Claude defaults to on.

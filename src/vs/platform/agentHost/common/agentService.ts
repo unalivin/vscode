@@ -306,6 +306,15 @@ export function isAgentEnabled(envValue: string | undefined, defaultEnabled: boo
 }
 
 /**
+ * Whether this product supplies the Copilot product configuration required to
+ * expose the Copilot Agent Host provider. Shared Agent Host code can still be
+ * present in products that deliberately omit this integration.
+ */
+export function isCopilotAgentConfigured(defaultChatAgent: unknown): boolean {
+	return typeof defaultChatAgent === 'object' && defaultChatAgent !== null;
+}
+
+/**
  * Selects whether the regular workbench surfaces Codex from the agent host
  * instead of the OpenAI extension.
  */

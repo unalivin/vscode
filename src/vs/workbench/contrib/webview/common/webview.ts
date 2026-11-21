@@ -26,11 +26,14 @@ export interface WebviewMouseActivity {
  * This is hardcoded because we never expect to actually hit it. Instead these requests
  * should always go to a service worker.
  */
-export const webviewResourceBaseHost = 'vscode-cdn.net';
+// Webview resource URLs are synthetic and should only be intercepted by the webview's service
+// worker. `.localhost` is a potentially trustworthy loopback origin and does not require a
+// Kodra-operated public CDN or wildcard certificate.
+export const webviewResourceBaseHost = 'kodra-resource.localhost';
 
 export const webviewRootResourceAuthority = `vscode-resource.${webviewResourceBaseHost}`;
 
-export const webviewGenericCspSource = `'self' https://*.${webviewResourceBaseHost}`;
+export const webviewGenericCspSource = `'self' http://*.${webviewResourceBaseHost}`;
 
 /**
  * Construct a uri that can load resources inside a webview
@@ -59,7 +62,7 @@ export function asWebviewUri(resource: URI, remoteInfo?: WebviewRemoteInfo): URI
 	}
 
 	return URI.from({
-		scheme: Schemas.https,
+		scheme: Schemas.http,
 		authority: `${resource.scheme}+${encodeAuthority(resource.authority)}.${webviewRootResourceAuthority}`,
 		path: resource.path,
 		fragment: resource.fragment,

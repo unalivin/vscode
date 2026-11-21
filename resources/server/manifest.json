@@ -1,6 +1,7 @@
 {
-	"name": "Code - OSS",
-	"short_name": "Code- OSS",
+	"name": "Kodra",
+	"short_name": "Kodra",
+	"description": "Kodra is an Android-focused code editor based on Code - OSS.",
 	"start_url": "/",
 	"lang": "en-US",
 	"display": "standalone",

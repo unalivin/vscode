@@ -2107,6 +2107,27 @@ suite('DefaultAccountProvider', () => {
 	}
 });
 
+suite('DefaultAccountService without a default chat agent', () => {
+
+	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('opens its initialization barrier and remains inert', async () => {
+		const productService = { ...TestProductService, defaultChatAgent: undefined } as unknown as IProductService;
+		const service = disposables.add(new DefaultAccountService(productService));
+
+		const account = await Promise.race([
+			service.getDefaultAccount(),
+			timeout(0).then(() => 'initialization barrier remained closed' as const),
+		]);
+
+		assert.strictEqual(account, null);
+		assert.strictEqual(await service.refresh(), null);
+		assert.strictEqual(await service.signIn(), null);
+		await service.signOut();
+		assert.deepStrictEqual(service.getDefaultAccountAuthenticationProvider(), { id: '', name: '', enterprise: false });
+	});
+});
+
 suite('DefaultAccountProvider sign in scopes', () => {
 
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();

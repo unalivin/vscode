@@ -154,4 +154,19 @@ suite('Dialog', () => {
 			}
 		);
 	});
+
+	test('omits Copilot from About details when the product does not ship it', () => {
+		const productService: IProductService = {
+			_serviceBrand: undefined,
+			...product,
+			copilotVersions: undefined
+		};
+		const { details, detailsToCopy, title } = createNativeAboutDialogDetails(productService, osProperties);
+
+		assert.strictEqual(title, productService.nameLong);
+		assert.ok(details.includes('Based on Code - OSS'));
+		assert.ok(detailsToCopy.includes('Based on Code - OSS'));
+		assert.ok(!details.includes('@github/copilot'));
+		assert.ok(!detailsToCopy.includes('@microsoft/copilot-sdk'));
+	});
 });

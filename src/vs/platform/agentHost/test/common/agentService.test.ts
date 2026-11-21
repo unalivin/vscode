@@ -9,7 +9,7 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/c
 import { ConfigurationTarget, IConfigurationChangeEvent, IConfigurationService } from '../../../configuration/common/configuration.js';
 import { COPILOT_TEMPORARY_ALLOW_LOCAL_HARNESS_KEY, thirdPartyAgentEnabledValue } from '../../../policy/common/copilotManagedSettings.js';
 import { AgentSession, GITHUB_COPILOT_PROTECTED_RESOURCE, GITHUB_REPO_PROTECTED_RESOURCE, protectedResourcesRequireGitHubCopilotSignIn } from '../../common/agent.js';
-import { affectsAgentHostProviderPreference, AgentHostClaudeAgentEnabledSettingId, AgentHostCodexAgentEnabledSettingId, AgentHostOTelEnvVars, AgentHostOTelPolicyState, buildAgentHostOTelEnv, CodexPreferAgentHostEditorSettingId, isAgentEnabled, readAgentHostOTelPolicySettings, sanitizeAgentHostOTelPolicySettings, shouldSurfaceLocalAgentHostProvider } from '../../common/agentService.js';
+import { affectsAgentHostProviderPreference, AgentHostClaudeAgentEnabledSettingId, AgentHostCodexAgentEnabledSettingId, AgentHostOTelEnvVars, AgentHostOTelPolicyState, buildAgentHostOTelEnv, CodexPreferAgentHostEditorSettingId, isAgentEnabled, isCopilotAgentConfigured, readAgentHostOTelPolicySettings, sanitizeAgentHostOTelPolicySettings, shouldSurfaceLocalAgentHostProvider } from '../../common/agentService.js';
 import type { ProtectedResourceMetadata } from '../../common/state/protocol/state.js';
 import { TestConfigurationService } from '../../../configuration/test/common/testConfigurationService.js';
 
@@ -93,6 +93,17 @@ suite('isAgentEnabled', () => {
 			assert.strictEqual(isAgentEnabled(envValue, defaultEnabled), expected);
 		});
 	}
+});
+
+suite('isCopilotAgentConfigured', () => {
+
+	test('only enables the Copilot provider when a product configures a default chat agent', () => {
+		assert.strictEqual(isCopilotAgentConfigured(undefined), false);
+		assert.strictEqual(isCopilotAgentConfigured(null), false);
+		assert.strictEqual(isCopilotAgentConfigured(false), false);
+		assert.strictEqual(isCopilotAgentConfigured('copilot'), false);
+		assert.strictEqual(isCopilotAgentConfigured({}), true);
+	});
 });
 
 suite('shouldSurfaceLocalAgentHostProvider', () => {

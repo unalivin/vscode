@@ -39,7 +39,7 @@ import { IServerEnvironmentService, ServerParsedArgs } from './serverEnvironment
 import { IServerLifetimeService } from './serverLifetimeService.js';
 import { getRemoteResourceResponseHeaders } from './remoteResourceResponse.js';
 import { setupServerServices, SocketServer } from './serverServices.js';
-import { CacheControl, serveError, serveFile, WebClientServer } from './webClientServer.js';
+import { CacheControl, serveError, serveFile, WebClientServer, WEBVIEW_SHELL_PATH } from './webClientServer.js';
 const require = createRequire(import.meta.url);
 
 function parseRequestUrl(requestUrl: string): URL | undefined {
@@ -139,6 +139,13 @@ class RemoteExtensionHostAgentServer extends Disposable implements IServerAPI {
 		// for now accept all paths, with or without server product path
 		if (pathname.startsWith(this._serverProductPath) && pathname.charCodeAt(this._serverProductPath.length) === CharCode.Slash) {
 			pathname = pathname.substring(this._serverProductPath.length);
+		}
+
+		// The webview shell contains only bundled static files. It is served before token
+		// validation so each isolated localhost origin can load the shell without receiving the
+		// workbench's connection cookie or exposing authenticated workbench routes.
+		if (this._webClientServer && (pathname === WEBVIEW_SHELL_PATH || pathname.startsWith(`${WEBVIEW_SHELL_PATH}/`))) {
+			return this._webClientServer.handlePublicWebviewShellRequest(req, res, parsedUrl, pathname);
 		}
 
 		// Version

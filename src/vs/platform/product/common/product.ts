@@ -59,7 +59,7 @@ else if (globalThis._VSCODE_PRODUCT_JSON && globalThis._VSCODE_PACKAGE_JSON) {
 		});
 	}
 
-	if (!product.copilotVersions) {
+	if (product.defaultChatAgent && !product.copilotVersions) {
 		const sdk = getDependencyVersion(packageConfiguration, '@microsoft/copilot-sdk');
 		if (packageConfiguration.copilotRuntimeVersion && sdk) {
 			Object.assign(product, { copilotVersions: { runtime: packageConfiguration.copilotRuntimeVersion, sdk } });

@@ -239,14 +239,17 @@ export class BrowserWorkbenchEnvironmentService implements IBrowserWorkbenchEnvi
 
 	@memoize
 	get webviewExternalEndpoint(): string {
-		const endpoint = this.options.webviewEndpoint
-			|| this.productService.webviewContentExternalBaseUrlTemplate
-			|| 'https://{{uuid}}.vscode-cdn.net/{{quality}}/{{commit}}/out/vs/workbench/contrib/webview/browser/pre/';
+		const endpoint = this.options.webviewEndpoint || this.productService.webviewContentExternalBaseUrlTemplate;
+		if (!endpoint) {
+			// Webviews must be explicitly configured by the embedder/server. Never fall back to a
+			// Microsoft-hosted CDN, which is not necessarily available to downstream products.
+			return '';
+		}
 
 		const webviewExternalEndpointCommit = this.payload?.get('webviewExternalEndpointCommit');
 		return endpoint
-			.replace('{{commit}}', webviewExternalEndpointCommit ?? this.productService.commit ?? 'ef65ac1ba57f57f2a3961bfe94aa20481caca4c6')
-			.replace('{{quality}}', (webviewExternalEndpointCommit ? 'insider' : this.productService.quality) ?? 'insider');
+			.replace('{{commit}}', webviewExternalEndpointCommit ?? this.productService.commit ?? '')
+			.replace('{{quality}}', (webviewExternalEndpointCommit ? 'insider' : this.productService.quality) ?? '');
 	}
 
 	@memoize

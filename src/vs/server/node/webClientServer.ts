@@ -13,7 +13,7 @@ import { isLinux } from '../../base/common/platform.js';
 import { ILogService, LogLevel } from '../../platform/log/common/log.js';
 import { IServerEnvironmentService } from './serverEnvironmentService.js';
 import { extname, dirname, join, normalize, posix, resolve } from '../../base/common/path.js';
-import { FileAccess, connectionTokenCookieName, connectionTokenQueryName, Schemas, builtinExtensionsPath } from '../../base/common/network.js';
+import { COI, FileAccess, connectionTokenCookieName, connectionTokenQueryName, Schemas, builtinExtensionsPath } from '../../base/common/network.js';
 import { generateUuid } from '../../base/common/uuid.js';
 import { IProductService } from '../../platform/product/common/productService.js';
 import { ServerConnectionToken, ServerConnectionTokenType } from './serverConnectionToken.js';
@@ -114,6 +114,9 @@ const STATIC_PATH = `/static`;
 const MANIFEST_PATH = `/resources/server/manifest.json`;
 const CALLBACK_PATH = `/callback`;
 const WEB_EXTENSION_PATH = `/web-extension-resource`;
+export const WEBVIEW_SHELL_PATH = `/webview-shell`;
+const WEBVIEW_SHELL_ASSETS = new Set(['index.html', 'fake.html', 'service-worker.js']);
+const LOCAL_WEBVIEW_HOST_PATTERN = /^[0-9a-v]{52}\.localhost$/i;
 const webWorkerExtensionHostIframeScriptSHA = 'sha256-daEgfo2VIXpx2Np71KqCCbkeQwv+68vPrx54XRcbdcs=';
 
 /**
@@ -134,6 +137,99 @@ export function isSafeBasePath(basePath: string): boolean {
 		&& !/[?#\\]|[\u0000-\u001F\u007F]/.test(basePath);
 }
 
+export function getWebviewShellAssetName(pathname: string): string | undefined {
+	if (!pathname.startsWith(`${WEBVIEW_SHELL_PATH}/`)) {
+		return undefined;
+	}
+	const assetName = pathname.substring(WEBVIEW_SHELL_PATH.length + 1);
+	return WEBVIEW_SHELL_ASSETS.has(assetName) ? assetName : undefined;
+}
+
+function parseLocalWebviewAuthority(authority: string): { readonly hostname: string; readonly port: number } | undefined {
+	try {
+		if (!authority || authority.includes('\\') || authority.includes('/') || authority.includes('?') || authority.includes('#')
+			|| Array.from(authority).some(character => {
+				const code = character.charCodeAt(0);
+				return code <= 0x20 || code === 0x7f;
+			})) {
+			return undefined;
+		}
+		const url = new URL(`http://${authority}`);
+		if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+			return undefined;
+		}
+
+		const hostname = url.hostname.toLowerCase();
+		const isLoopbackHost = hostname === 'localhost'
+			|| hostname.endsWith('.localhost')
+			|| (hostname.startsWith('127.') && hostname.split('.').length === 4)
+			|| hostname === '[::1]'
+			|| hostname === '::1';
+		if (!isLoopbackHost) {
+			return undefined;
+		}
+		return { hostname, port: url.port ? Number(url.port) : 80 };
+	} catch {
+		return undefined;
+	}
+}
+
+export function isLocalWebviewServerAuthority(authority: string): boolean {
+	return parseLocalWebviewAuthority(authority) !== undefined;
+}
+
+export function createLocalWebviewShellEndpoint(authority: string, port: number | undefined, shellRoute: string): string | undefined {
+	const parsedAuthority = parseLocalWebviewAuthority(authority);
+	if (!parsedAuthority || port === undefined || !Number.isInteger(port) || port < 1 || parsedAuthority.port !== port) {
+		return undefined;
+	}
+	if (!isSafeBasePath(shellRoute) || shellRoute === '/' || shellRoute.endsWith('/')
+		|| shellRoute.split('/').some(segment => segment === '.' || segment === '..')) {
+		return undefined;
+	}
+	return `http://{{uuid}}.localhost${port === 80 ? '' : `:${port}`}${shellRoute}/`;
+}
+
+function isLoopbackAddress(address: string | undefined): boolean {
+	if (!address) {
+		return false;
+	}
+	const normalizedAddress = address.toLowerCase().split('%')[0];
+	return normalizedAddress === '::1'
+		|| normalizedAddress.startsWith('127.')
+		|| normalizedAddress.startsWith('::ffff:127.');
+}
+
+export function isLocalWebviewShellRequest(hostHeader: string | undefined, localPort: number | undefined, remoteAddress: string | undefined, localAddress: string | undefined): boolean {
+	const host = hostHeader ? parseLocalWebviewAuthority(hostHeader) : undefined;
+	return !!host
+		&& LOCAL_WEBVIEW_HOST_PATTERN.test(host.hostname)
+		&& localPort !== undefined
+		&& host.port === localPort
+		&& isLoopbackAddress(remoteAddress)
+		&& isLoopbackAddress(localAddress);
+}
+
+export function getWebviewFrameSource(endpointTemplate: string): string {
+	const uuidPlaceholderCount = endpointTemplate.split('{{uuid}}').length - 1;
+	const endpoint = new URL(endpointTemplate.replace('{{uuid}}', 'kodra-webview'));
+	if (endpoint.protocol !== 'http:' && endpoint.protocol !== 'https:') {
+		throw new Error(`Unsupported webview endpoint protocol: ${endpoint.protocol}`);
+	}
+	if (endpoint.username || endpoint.password || uuidPlaceholderCount > 1) {
+		throw new Error('Webview endpoint must not include credentials or multiple UUID placeholders.');
+	}
+
+	let hostname = endpoint.hostname;
+	if (uuidPlaceholderCount === 1) {
+		if (!hostname.startsWith('kodra-webview.')) {
+			throw new Error('The webview UUID placeholder must be a leading subdomain.');
+		}
+		hostname = `*.${hostname.substring('kodra-webview.'.length)}`;
+	}
+	return `${endpoint.protocol}//${hostname}${endpoint.port ? `:${endpoint.port}` : ''}`;
+}
+
 export function createScriptNonce(): string {
 	return crypto.randomBytes(16).toString('base64url');
 }
@@ -142,14 +238,14 @@ export function createNlsUrl(nlsBaseUrl: string, commit: string | undefined, ver
 	return `${nlsBaseUrl}${commit}/${version}/${encodeURIComponent(locale)}/nls.messages.js`;
 }
 
-export function createWorkbenchContentSecurityPolicy(scriptNonce: string, nlsBaseUrl: string | undefined, remoteAuthority: string, useTestResolver: boolean): string {
+export function createWorkbenchContentSecurityPolicy(scriptNonce: string, nlsBaseUrl: string | undefined, remoteAuthority: string, useTestResolver: boolean, webviewFrameSource = "'none'"): string {
 	return [
 		'default-src \'self\';',
 		'img-src \'self\' https: data: blob:;',
 		'media-src \'self\';',
 		`script-src 'self' 'unsafe-eval' ${nlsBaseUrl ?? ''} blob: 'nonce-${scriptNonce}' '${webWorkerExtensionHostIframeScriptSHA}' 'sha256-/r7rqQ+yrxt57sxLuQ6AMYcy/lUpvAIzHjIJt/OeLWU=' ${useTestResolver ? '' : `http://${remoteAuthority}`};`,  // the sha is the same as in src/vs/workbench/services/extensions/worker/webWorkerExtensionHostIframe.html
 		'child-src \'self\';',
-		`frame-src 'self' https://*.vscode-cdn.net data:;`,
+		`frame-src 'self' ${webviewFrameSource} data:;`,
 		'worker-src \'self\' data: blob:;',
 		'style-src \'self\' \'unsafe-inline\';',
 		'connect-src \'self\' ws: wss: https:;',
@@ -213,6 +309,29 @@ export class WebClientServer {
 
 			return serveError(req, res, 500, 'Internal Server Error.');
 		}
+	}
+
+	/**
+	 * Serves only the bundled webview shell files. These assets contain no user data, so they are
+	 * available on the per-webview loopback origin without the workbench connection cookie.
+	 */
+	async handlePublicWebviewShellRequest(req: http.IncomingMessage, res: http.ServerResponse, parsedUrl: URL, pathname: string): Promise<void> {
+		const assetName = getWebviewShellAssetName(pathname);
+		if (!assetName || req.method !== 'GET') {
+			return serveError(req, res, assetName ? 405 : 404, assetName ? 'Method not allowed.' : 'Not found.');
+		}
+
+		if (!isLocalWebviewShellRequest(req.headers.host, req.socket.localPort, req.socket.remoteAddress, req.socket.localAddress)) {
+			return serveError(req, res, 404, 'Not found.');
+		}
+
+		const filePath = FileAccess.asFileUri(`vs/workbench/contrib/webview/browser/pre/${assetName}`).fsPath;
+		const headers: Record<string, string> = {
+			'Cross-Origin-Resource-Policy': 'cross-origin',
+			'X-Content-Type-Options': 'nosniff',
+			...(COI.getHeadersFromQuery(parsedUrl) ?? {}),
+		};
+		return serveFile(filePath, CacheControl.NO_CACHING, this._logService, req, res, headers);
 	}
 
 	private async _handleManifest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -405,6 +524,14 @@ export class WebClientServer {
 		const staticRoute = posix.join(basePath, this._productPath, STATIC_PATH);
 		const callbackRoute = posix.join(basePath, this._productPath, CALLBACK_PATH);
 		const webExtensionRoute = posix.join(basePath, this._productPath, WEB_EXTENSION_PATH);
+		const webviewShellRoute = posix.join(basePath, this._productPath, WEBVIEW_SHELL_PATH);
+		const hasProxyHeaders = ['forwarded', 'x-original-host', 'x-forwarded-host', 'x-forwarded-port', 'x-forwarded-proto', 'x-forwarded-prefix']
+			.some(header => req.headers[header] !== undefined);
+		const localWebviewEndpoint = !hasProxyHeaders
+			&& isLoopbackAddress(req.socket.remoteAddress)
+			&& isLoopbackAddress(req.socket.localAddress)
+			? createLocalWebviewShellEndpoint(req.headers.host ?? '', req.socket.localPort, webviewShellRoute)
+			: undefined;
 
 		const resolveWorkspaceURI = (defaultLocation?: string) => defaultLocation && URI.file(resolve(defaultLocation)).with({ scheme: Schemas.vscodeRemote, authority: remoteAuthority });
 
@@ -419,6 +546,7 @@ export class WebClientServer {
 		const productConfiguration: Partial<Mutable<IProductConfiguration>> = {
 			embedderIdentifier: 'server-distro',
 			voiceWsUrl: this._productService.voiceWsUrl,
+			webviewContentExternalBaseUrlTemplate: localWebviewEndpoint ?? this._productService.webviewContentExternalBaseUrlTemplate,
 			extensionsGallery: this._webExtensionResourceUrlTemplate && this._productService.extensionsGallery ? {
 				...this._productService.extensionsGallery,
 				resourceUrlTemplate: this._webExtensionResourceUrlTemplate.with({
@@ -435,6 +563,11 @@ export class WebClientServer {
 				Object.assign(productConfiguration, productOverrides);
 			} catch (err) {/* Ignore Error */ }
 		}
+
+		const webviewEndpointTemplate = productConfiguration.webviewContentExternalBaseUrlTemplate;
+		const webviewFrameSource = typeof webviewEndpointTemplate === 'string' && webviewEndpointTemplate
+			? getWebviewFrameSource(webviewEndpointTemplate)
+			: "'none'";
 
 		const workbenchWebConfiguration = {
 			remoteAuthority,
@@ -499,7 +632,7 @@ export class WebClientServer {
 			return void res.end('Not found');
 		}
 
-		const cspDirectives = createWorkbenchContentSecurityPolicy(scriptNonce, WORKBENCH_NLS_BASE_URL, remoteAuthority, useTestResolver);
+		const cspDirectives = createWorkbenchContentSecurityPolicy(scriptNonce, WORKBENCH_NLS_BASE_URL, remoteAuthority, useTestResolver, webviewFrameSource);
 
 		const headers: http.OutgoingHttpHeaders = {
 			'Content-Type': 'text/html',

@@ -12,6 +12,7 @@ import { IInlineCompletionsService } from '../../../../../editor/browser/service
 import { ContextKeyExpression, IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
 import { MockContextKeyService } from '../../../../../platform/keybinding/test/common/mockKeybindingService.js';
 import { IMarkdownRendererService } from '../../../../../platform/markdown/browser/markdownRenderer.js';
+import product from '../../../../../platform/product/common/product.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
 import { ChatEntitlement, IChatEntitlementService, IChatSentiment } from '../../../../services/chat/common/chatEntitlementService.js';
 import { ILifecycleService, LifecyclePhase } from '../../../../services/lifecycle/common/lifecycle.js';
@@ -203,6 +204,15 @@ suite('ChatStatusBarEntry', () => {
 
 	function flushTimers(): Promise<void> {
 		return new Promise<void>(resolve => setTimeout(resolve, 0));
+	}
+
+	if (!product.defaultChatAgent) {
+		test('does not register Copilot status UI without a default chat agent', () => {
+			const fixture = createEntry({ promo: true });
+			assert.strictEqual(fixture.statusbar.current, undefined);
+			assert.deepStrictEqual(fixture.promoQueries, []);
+		});
+		return;
 	}
 
 	test('defers promo initialization until the workbench is restored', async () => {

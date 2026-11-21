@@ -297,6 +297,14 @@ suite('ChatStatusDashboard', () => {
 		return dashboard;
 	}
 
+	if (!product.defaultChatAgent) {
+		test('renders no Copilot dashboard when no default chat agent is configured', () => {
+			const dashboard = createDashboard(createEntitlementService({}));
+			assert.strictEqual(dashboard.element.textContent, '');
+		});
+		return;
+	}
+
 	for (const available of [true, false]) {
 		test(`GitHub actions ${available ? 'open the session URL' : 'report an unavailable enterprise URL'}`, () => {
 			const opened: string[] = [];

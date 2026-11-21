@@ -1,0 +1,105 @@
+name: Kodra Linux ARM64 REH
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Linux ARM64 REH packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      NPM_ARCH: arm64
+      VSCODE_ARCH: arm64
+      npm_config_arch: arm64
+      VSCODE_SKIP_PRELAUNCH: '1'
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+      ONNXRUNTIME_NODE_INSTALL: skip
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Set up pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Install Linux build packages
+        uses: ./.github/actions/install-linux-packages
+
+      - name: Install build tooling dependencies
+        working-directory: build
+        run: pnpm install --frozen-lockfile
+
+      - name: Install ARM64 sysroots and workspace dependencies
+        run: |
+          set -euo pipefail
+          source ./build/azure-pipelines/linux/setup-env.sh
+          pnpm run preinstall
+          pnpm install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Build REH and REH-web
+        run: |
+          set -euo pipefail
+          pnpm run gulp vscode-reh-linux-arm64-min
+          pnpm run gulp vscode-reh-web-linux-arm64-min
+
+      - name: Verify Linux ARM64 package contents
+        run: |
+          set -euo pipefail
+          for package in ../vscode-reh-linux-arm64 ../vscode-reh-web-linux-arm64; do
+            test -s "$package/node"
+            file "$package/node"
+            readelf -h "$package/node" | grep -E 'Class:|Machine:.*AArch64'
+            node -e '
+              const p = require(process.argv[1]);
+              if (p.applicationName !== "kodra") throw new Error(`Unexpected product: ${p.applicationName}`);
+              for (const key of ["tunnelApplicationName", "tunnelApplicationConfig", "win32TunnelMutex", "win32TunnelServiceMutex"]) {
+                if (Object.prototype.hasOwnProperty.call(p, key)) throw new Error(`Unexpected tunnel product metadata: ${key}`);
+              }
+              console.log(`${p.nameLong} ${p.version}: ${p.applicationName}; tunnel metadata omitted`);
+            ' "$package/product.json"
+            test ! -e "$package/bin/kodra-tunnel"
+            test ! -e "$package/extensions/copilot"
+            echo "Packaged bin files for $package:"
+            find "$package/bin" -maxdepth 2 -type f -printf '%P\n' | sort
+          done
+
+      - name: Stage verified packages for artifact upload
+        run: |
+          set -euo pipefail
+          mkdir -p .build/kodra-artifacts
+          mv ../vscode-reh-linux-arm64 .build/kodra-artifacts/vscode-reh-linux-arm64
+          mv ../vscode-reh-web-linux-arm64 .build/kodra-artifacts/vscode-reh-web-linux-arm64
+
+      - name: Upload Linux ARM64 REH artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vscode-reh-linux-arm64
+          path: .build/kodra-artifacts/vscode-reh-linux-arm64
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Linux ARM64 REH-web artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vscode-reh-web-linux-arm64
+          path: .build/kodra-artifacts/vscode-reh-web-linux-arm64
+          if-no-files-found: error
+          retention-days: 14

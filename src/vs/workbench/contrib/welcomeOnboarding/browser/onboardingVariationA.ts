@@ -10,7 +10,6 @@ import { isCancellationError } from '../../../../base/common/errors.js';
 import { StopWatch } from '../../../../base/common/stopwatch.js';
 import { URI } from '../../../../base/common/uri.js';
 import { isWindows, isMacintosh, isLinux } from '../../../../base/common/platform.js';
-import { assertDefined } from '../../../../base/common/types.js';
 import { FileAccess } from '../../../../base/common/network.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
 import { KeyCode } from '../../../../base/common/keyCodes.js';
@@ -78,8 +77,8 @@ type OnboardingActionEvent = {
 
 type EnterpriseSignInUiState = 'options' | 'instance' | 'progress';
 
-assertDefined(product.defaultChatAgent, 'Onboarding requires a default chat agent product configuration.');
-const defaultChat = product.defaultChatAgent;
+// This Copilot onboarding flow is skipped by `show` when the product has no default chat agent.
+const defaultChat = product.defaultChatAgent!;
 
 /**
  * Variation A — Classic Wizard Modal
@@ -152,6 +151,10 @@ export class OnboardingVariationA extends Disposable implements IOnboardingServi
 	) {
 		super();
 
+		if (!product.defaultChatAgent) {
+			return; // Do not perform Copilot-specific onboarding setup for products without an agent.
+		}
+
 		// Detect currently active theme
 		const currentTheme = this.themeService.getColorTheme();
 		const allThemes = product.onboardingThemes ?? [];
@@ -169,6 +172,9 @@ export class OnboardingVariationA extends Disposable implements IOnboardingServi
 	}
 
 	show(): void {
+		if (!product.defaultChatAgent) {
+			return; // There is no Copilot sign-in configuration to onboard into.
+		}
 		if (this.overlay) {
 			return;
 		}

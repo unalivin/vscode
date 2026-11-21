@@ -143,6 +143,10 @@ export class ChatStatusBarEntry extends Disposable implements IWorkbenchContribu
 		super();
 
 		this.quotaResumeState = this.readPersistedQuotaResumeState();
+		if (!product.defaultChatAgent) {
+			return; // Kodra has no Copilot status UI when no default chat agent is configured.
+		}
+
 		lifecycleService.when(LifecyclePhase.Restored).then(() => {
 			if (!this._store.isDisposed) {
 				this.promo = this._register(this.instantiationService.createInstance(ChatStatusPromo));
@@ -220,7 +224,8 @@ export class ChatStatusBarEntry extends Disposable implements IWorkbenchContribu
 		this._register(this.editorService.onDidActiveEditorChange(() => this.onDidActiveEditorChange()));
 
 		this._register(this.configurationService.onDidChangeConfiguration(e => {
-			if (e.affectsConfiguration(product.defaultChatAgent?.completionsEnablementSetting) || e.affectsConfiguration(ChatConfiguration.TitleBarSignInEnabled)) {
+			const completionsEnablementSetting = product.defaultChatAgent?.completionsEnablementSetting;
+			if ((completionsEnablementSetting && e.affectsConfiguration(completionsEnablementSetting)) || e.affectsConfiguration(ChatConfiguration.TitleBarSignInEnabled)) {
 				this.update();
 			}
 		}));

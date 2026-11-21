@@ -9,7 +9,7 @@ import { promises } from 'fs';
 import { FileAccess } from '../../../base/common/network.js';
 import { htmlAttributeEncodeValue } from '../../../base/common/strings.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../base/test/common/utils.js';
-import { createNlsUrl, createScriptNonce, createWorkbenchContentSecurityPolicy, isSafeBasePath, renderWorkbenchTemplate } from '../../node/webClientServer.js';
+import { createLocalWebviewShellEndpoint, createNlsUrl, createScriptNonce, createWorkbenchContentSecurityPolicy, getWebviewFrameSource, getWebviewShellAssetName, isLocalWebviewServerAuthority, isLocalWebviewShellRequest, isSafeBasePath, renderWorkbenchTemplate } from '../../node/webClientServer.js';
 
 /**
  * Decodes the five entities produced by `htmlAttributeEncodeValue`, the same way a browser
@@ -178,5 +178,79 @@ suite('WebClientServer', () => {
 			false,
 			false
 		]);
+	});
+
+	test('serves only the bundled webview shell allowlist', () => {
+		const paths = [
+			'/webview-shell/index.html',
+			'/webview-shell/fake.html',
+			'/webview-shell/service-worker.js',
+			'/webview-shell/../../product.json',
+			'/webview-shell/%69ndex.html',
+			'/webview-shell/index.html/extra',
+			'/static/index.html'
+		];
+
+		assert.deepStrictEqual(paths.map(getWebviewShellAssetName), [
+			'index.html',
+			'fake.html',
+			'service-worker.js',
+			undefined,
+			undefined,
+			undefined,
+			undefined
+		]);
+	});
+
+	test('configures a per-webview localhost shell endpoint only for matching local authorities', () => {
+		assert.deepStrictEqual([
+			isLocalWebviewServerAuthority('localhost:3000'),
+			isLocalWebviewServerAuthority('127.0.0.1:3000'),
+			isLocalWebviewServerAuthority('[::1]:3000'),
+			isLocalWebviewServerAuthority('example.com:3000'),
+			isLocalWebviewServerAuthority('localhost:3000/path'),
+			createLocalWebviewShellEndpoint('localhost:3000', 3000, '/stable/webview-shell'),
+			createLocalWebviewShellEndpoint('localhost:3000', 3001, '/stable/webview-shell'),
+			createLocalWebviewShellEndpoint('example.com:3000', 3000, '/stable/webview-shell'),
+			createLocalWebviewShellEndpoint('localhost:3000', 3000, '//evil.example')
+		], [
+			true,
+			true,
+			true,
+			false,
+			false,
+			'http://{{uuid}}.localhost:3000/stable/webview-shell/',
+			undefined,
+			undefined,
+			undefined
+		]);
+	});
+
+	test('restricts the public shell route to a hashed localhost origin on the loopback socket', () => {
+		const isolatedHost = `${'a'.repeat(52)}.localhost:3000`;
+		assert.deepStrictEqual([
+			isLocalWebviewShellRequest(isolatedHost, 3000, '127.0.0.1', '127.0.0.1'),
+			isLocalWebviewShellRequest('localhost:3000', 3000, '127.0.0.1', '127.0.0.1'),
+			isLocalWebviewShellRequest(isolatedHost, 3001, '127.0.0.1', '127.0.0.1'),
+			isLocalWebviewShellRequest(isolatedHost, 3000, '192.168.1.2', '127.0.0.1'),
+			isLocalWebviewShellRequest(isolatedHost, 3000, '127.0.0.1', '192.168.1.2'),
+			isLocalWebviewShellRequest('bad-host.localhost:3000', 3000, '127.0.0.1', '127.0.0.1'),
+			isLocalWebviewShellRequest('a'.repeat(52) + '.localhost:3000/path', 3000, '127.0.0.1', '127.0.0.1')
+		], [true, false, false, false, false, false, false]);
+	});
+
+	test('limits the workbench frame-src to the configured webview endpoint', () => {
+		const localEndpoint = 'http://{{uuid}}.localhost:3000/stable/webview-shell/';
+		const upstreamEndpoint = 'https://{{uuid}}.vscode-cdn.net/stable/pre/';
+		const nonce = createScriptNonce();
+		const defaultPolicy = createWorkbenchContentSecurityPolicy(nonce, undefined, 'localhost:3000', false);
+		const localPolicy = createWorkbenchContentSecurityPolicy(nonce, undefined, 'localhost:3000', false, getWebviewFrameSource(localEndpoint));
+
+		assert.strictEqual(getWebviewFrameSource(localEndpoint), 'http://*.localhost:3000');
+		assert.strictEqual(getWebviewFrameSource(upstreamEndpoint), 'https://*.vscode-cdn.net');
+		assert.ok(defaultPolicy.includes("frame-src 'self' 'none' data:"));
+		assert.ok(!defaultPolicy.includes('vscode-cdn.net'));
+		assert.ok(localPolicy.includes("frame-src 'self' http://*.localhost:3000 data:"));
+		assert.throws(() => getWebviewFrameSource('https://example.com/{{uuid}}/shell/'));
 	});
 });

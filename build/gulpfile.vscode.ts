@@ -158,7 +158,7 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 			.pipe(rename(function (path) { path.dirname = path.dirname!.replace(new RegExp('^' + out), 'out'); }))
 			.pipe(util.setExecutableBit(['**/*.sh']));
 
-		const platformSpecificBuiltInExtensionsExclusions = product.builtInExtensions.filter(ext => {
+		const platformSpecificBuiltInExtensionsExclusions = (product.builtInExtensions as { name: string; platforms?: string[] }[]).filter(ext => {
 			if (!(ext as { platforms?: string[] }).platforms) {
 				return false;
 			}
