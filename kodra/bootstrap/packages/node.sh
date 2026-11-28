@@ -109,6 +109,10 @@ STUB
 		return 1
 	fi
 
+	if ! node_patch_v8_gyp "$src/tools/v8_gypfiles/v8.gyp"; then
+		return 1
+	fi
+
 	node_configure() {
 		local log="$1"
 		# Positional arguments are forwarded to gyp by configure ("pass the leftover
@@ -180,6 +184,34 @@ STUB
 		return 1
 	fi
 	make install DESTDIR="$KODRA_ROOTFS" || return 1
+}
+
+# node_patch_v8_gyp <file> — let the host toolset have V8's wasm trap handler on Android.
+#
+# V8 decides whether the trap handler exists in a header, from the compiler's own
+# predefines: "V8_OS_LINUX && !V8_OS_ANDROID" for arm64. A *native* arm64 compiler is
+# Linux, so every host object (mksnapshot's V8) references TryHandleSignal and
+# RegisterDefaultTrapHandler. The gyp condition that adds the files defining them lists
+# only OS in "linux mac ios openharmony", and OS here is "android", so the host link
+# comes up two symbols short. gn's BUILD.gn carries the same OS list, which is why
+# upstream has not met this: there the host is built with target_os=linux.
+#
+# Only the host toolset is added. The Android target must keep the trap handler off —
+# that is what the header says, and enabling it would install a signal handler that
+# the platform's bionic does not support the way V8 assumes.
+node_patch_v8_gyp() {
+	local file="$1" count
+	if [ ! -f "$file" ]; then
+		printf 'node: error: no %s to patch\n' "$file" >&2
+		return 1
+	fi
+	count="$(grep -c '(OS in "linux mac ios openharmony")' "$file" || true)"
+	if [ "$count" != "1" ]; then
+		printf 'node: error: trap-handler condition appears %s times, expected 1\n' "$count" >&2
+		return 1
+	fi
+	sed -i 's|(OS in "linux mac ios openharmony")|(OS in "linux mac ios openharmony" or (OS=="android" and _toolset=="host"))|' "$file"
+	return 0
 }
 
 # node_cpu_features — compile the NDK's cpufeatures implementation for the target into
