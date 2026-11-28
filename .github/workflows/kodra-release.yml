@@ -44,14 +44,15 @@ jobs:
           gradle-version: "8.9"
 
       - name: Restore keystore
-        if: env.KODRA_KEYSTORE_BASE64 != ''
         run: |
+          if [ -z "${KODRA_KEYSTORE_BASE64}" ]; then
+            echo "The KODRA_KEYSTORE_BASE64 repository secret is not set, so the release APK cannot be signed."
+            echo "::error title=Missing keystore::KODRA_KEYSTORE_BASE64 is empty — refusing to build an uninstallable release APK."
+            exit 1
+          fi
           echo "$KODRA_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/kodra-release.jks"
+          test -s "$RUNNER_TEMP/kodra-release.jks"
           echo "KODRA_KEYSTORE=$RUNNER_TEMP/kodra-release.jks" >> "$GITHUB_ENV"
-
-      - name: Warn when unsigned
-        if: env.KODRA_KEYSTORE_BASE64 == ''
-        run: echo "::warning::No KODRA_KEYSTORE_BASE64 secret; the release APK will be unsigned and not installable."
 
       - name: Assemble release APK
         working-directory: kodra/android
@@ -59,7 +60,29 @@ jobs:
           KODRA_KEYSTORE_PASSWORD: ${{ secrets.KODRA_KEYSTORE_PASSWORD }}
           KODRA_KEY_ALIAS: ${{ secrets.KODRA_KEY_ALIAS }}
           KODRA_KEY_PASSWORD: ${{ secrets.KODRA_KEY_PASSWORD }}
-        run: gradle --no-daemon :app:assembleRelease --stacktrace
+        run: |
+          set -o pipefail
+          # Version comes from the tag so published APKs stay monotonic; the run number
+          # keeps versionCode increasing even for workflow_dispatch builds.
+          version_name="${GITHUB_REF_NAME#v}"
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            version_name="0.0.0-${GITHUB_RUN_NUMBER}"
+          fi
+          gradle --no-daemon :app:assembleRelease --stacktrace \
+            -PkodraVersionName="$version_name" \
+            -PkodraVersionCode="${GITHUB_RUN_NUMBER}" 2>&1 | tee "$RUNNER_TEMP/gradle-release.log"
+
+      - name: Report build errors
+        if: failure()
+        run: |
+          log="$RUNNER_TEMP/gradle-release.log"
+          test -s "$log" || exit 0
+          patterns='^e: |error:|AAPT:|Android resource linking failed|Manifest merger failed|FAILURE: Build failed|What went wrong|Caused by:'
+          { grep -E "$patterns" -A2 "$log" || true; } | head -60 | while IFS= read -r line; do
+            escaped="${line//'%'/'%25'}"
+            escaped="${escaped//$'\r'/'%0D'}"
+            echo "::error title=Gradle release::${escaped}"
+          done
 
       - name: Upload release APK artifact
         uses: actions/upload-artifact@v7.0.2

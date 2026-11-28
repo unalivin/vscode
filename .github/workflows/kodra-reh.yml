@@ -189,11 +189,21 @@ jobs:
         run: |
           set -euo pipefail
           node build/kodra/inventory-to-markdown.mjs
-          git diff --exit-code -- kodra/deps/INVENTORY.md || {
+          if ! git diff --exit-code -- kodra/deps/INVENTORY.md; then
             echo "kodra/deps/INVENTORY.md is stale — run 'node build/kodra/inventory-to-markdown.mjs' and commit." >&2
-            git diff -- kodra/deps/INVENTORY.md >&2
+            diff_text="$(git diff -- kodra/deps/INVENTORY.md | head -40)"
+            {
+              echo '### Bootstrap inventory is stale'
+              echo '```diff'
+              printf '%s\n' "$diff_text"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            # Actions logs are not always reachable outside the run, so the gate
+            # reports the diff as an annotation as well.
+            escaped="$(printf '%s' "$diff_text" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk '{printf "%s%%0A", $0}')"
+            echo "::error title=Stale inventory::${escaped}"
             exit 1
-          }
+          fi
           echo "Bootstrap inventory in sync (51 deps, 0 unknown)."
 
       - name: Upload host inventory

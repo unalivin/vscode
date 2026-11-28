@@ -66,14 +66,18 @@ const rules = {
   'zod': ['binary','JS schema validation; keep.'],
 };
 
+// Locale-independent ordering: `localeCompare` changes order with the CI runner's
+// ICU data and LANG, which would make the committed file differ between machines.
+const compareAscii = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
 const deps = pkg.dependencies;
 const rows = Object.entries(deps).map(([name,ver])=>{
   const r=rules[name];
   if (!r) throw new Error(`Missing triage for ${name} — update inventory-to-markdown.mjs`);
   return {name, ver, klass:r[0], reason:r[1]};
-}).sort((a,b)=>a.klass.localeCompare(b.klass)||a.name.localeCompare(b.name));
+}).sort((a,b)=>compareAscii(a.klass,b.klass)||compareAscii(a.name,b.name));
 
-const md = [`# Bootstrap inventory — ${new Date().toISOString().slice(0,10)}`,
+const md = [`# Bootstrap inventory (generated — do not edit)`,
 `Generated from remote/package.json nativeBuild ${pkg.nativeBuild.target} @ ${pkg.nativeBuild.disturl}`,
 '',
 '| package | version | class | notes |',

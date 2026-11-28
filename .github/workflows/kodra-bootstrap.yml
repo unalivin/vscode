@@ -1,0 +1,469 @@
+name: Kodra Bootstrap (bionic aarch64)
+
+# Builds the Termux-style runtime that Kodra ships in the APK, for Kodra's own
+# prefix (/data/data/dev.sonixdevs.kodra/files/usr) rather than com.termux, and
+# executes the result against a real Android/bionic userland.
+#
+# Log access note: Actions job logs are served from Azure blob storage, which the
+# development sandbox cannot reach. Every step below therefore routes failures
+# through kodra/bootstrap/lib/ci.sh, which emits annotations instead.
+
+on:
+  # `packages` exists to shorten the loop while porting: a dispatch with `node` runs
+  # the toolchain, the runtime and one package instead of all of them. Everything
+  # still builds by default, including on push and pull request.
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: Comma-separated packages to build
+        required: false
+        default: zlib,bash,git,node,node-pty
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - "kodra/bootstrap/**"
+      - ".github/workflows/kodra-bootstrap.yml"
+
+permissions:
+  contents: read
+
+env:
+  ANDROID_API: "28"
+  KODRA_PREFIX: /data/data/dev.sonixdevs.kodra/files/usr
+  BUILD_ROOT: ${{ github.workspace }}/build-out
+
+jobs:
+  probe:
+    name: Toolchain + Android runtime probe
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: kodra/bootstrap
+
+      - name: Lint the bootstrap scripts and this workflow
+        run: |
+          set -euo pipefail
+          # The workflow check needs a YAML parser; the runner's python does not ship one.
+          python3 -m pip install --quiet --break-system-packages pyyaml \
+            || echo '::warning::pyyaml unavailable, workflow checks skipped'
+          python3 kodra/bootstrap/lib/lint.py
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4.0.4
+
+      - name: Install host build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm binutils e2fsprogs unzip xz-utils openssl zip gdb
+
+      - name: Install NDK
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          set -e
+          ci_trap "ndk"
+          for ndk in "ndk;27.2.12479018" "ndk;26.3.11579264"; do
+            if sdkmanager --install "$ndk" >"$RUNNER_TEMP/ndk.log" 2>&1; then
+              version="${ndk#ndk;}"
+              echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$version" >> "$GITHUB_ENV"
+              ci_notice "ndk" "installed $ndk"
+              exit 0
+            fi
+          done
+          ci_annotate_log "ndk" "$RUNNER_TEMP/ndk.log" 'Warning|Error|error'
+          exit 1
+
+      - name: Write toolchain environment
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          set -e
+          ci_trap "toolchain-env"
+          # Not '|| {...}': a failure there suppresses the ERR trap, and ci_run on a
+          # trivially successful command would annotate nothing. Pattern '.' makes
+          # every line of the log an annotation, so the cause is never invisible.
+          if ! kodra/bootstrap/toolchain.sh env > "$RUNNER_TEMP/toolchain.log" 2>&1; then
+            ci_annotate_log "toolchain-env" "$RUNNER_TEMP/toolchain.log" '.'
+            exit 1
+          fi
+          # Export CC/CXX/LDFLAGS/... to later steps through $GITHUB_ENV, which accepts
+          # only KEY=VALUE lines — the file's comments must be filtered out or the
+          # runner rejects the whole command with "Invalid format".
+          # Values are shell-quoted in the file so it can be sourced locally; $GITHUB_ENV
+          # takes them literally, so the quotes have to come off or every downstream step
+          # would receive ANDROID_API='28' with the quotes baked into the value.
+          grep '^export ' build-out/toolchain/toolchain.env \
+            | sed -e 's/^export //' \
+            | sed -E "s/^([A-Za-z_][A-Za-z0-9_]*)='(.*)'\$/\1=\2/" \
+            >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/build-out/toolchain/bin" >> "$GITHUB_PATH"
+          cat build-out/toolchain/toolchain.env >> "$GITHUB_STEP_SUMMARY"
+          ls -l "$GITHUB_WORKSPACE/build-out/toolchain/bin" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the compiler emits Android binaries
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          set -e
+          ci_trap "toolchain-verify"
+          ci_run "toolchain-verify" "$RUNNER_TEMP/verify.log" -- kodra/bootstrap/toolchain.sh verify
+          file build-out/toolchain-verify/hello | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Install the Android userland
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          set -e
+          ci_trap "android-runtime"
+          ci_run "android-runtime" "$RUNNER_TEMP/runtime.log" -- kodra/bootstrap/android-runtime.sh install
+          tail -n 20 "$RUNNER_TEMP/runtime.log" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Execute the probe inside the Android userland
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          set -e
+          ci_trap "android-exec"
+          mkdir -p "$BUILD_ROOT/rootfs$KODRA_PREFIX/bin"
+          install -m 0755 "$BUILD_ROOT/toolchain-verify/hello" \
+            "$BUILD_ROOT/rootfs$KODRA_PREFIX/bin/kodra-probe"
+          out="$(kodra/bootstrap/android-runtime.sh run "$KODRA_PREFIX/bin/kodra-probe" 2>&1)" && rc=0 || rc=$?
+          printf 'probe rc=%s out=%s\n' "$rc" "$out"
+          if [ "$rc" != "0" ]; then
+            ci_error "probe" "kodra-probe exited $rc: $out"
+            exit 1
+          fi
+          case "$out" in
+          *"kodra-probe ok"*) ci_notice "probe" "bionic execution verified: $out" ;;
+          *)
+            ci_error "probe" "unexpected probe output: $out"
+            exit 1
+            ;;
+          esac
+          printf '```text\n%s\n```\n' "$out" >> "$GITHUB_STEP_SUMMARY"
+
+      # Separate step so diagnostics can never mask the assertion above: this only
+      # runs when the probe failed, and its own failures are reported, not fatal.
+      - name: Diagnose a failing probe
+        if: failure()
+        run: |
+          set -uo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          cd "$GITHUB_WORKSPACE"
+          # ROOT is computed inside android-runtime.sh and is not exported; a bare $ROOT
+          # under set -u ends this step with status 1 and no message at all.
+          ROOT="${ANDROID_ROOT:-$BUILD_ROOT/android-root}"
+
+          # 1. Does code without libc run? Yes means the toolchain and the Android
+          #    loader work, leaving libc startup as the suspect.
+          printf '%s\n' \
+            'void _start(void) {' \
+            '  register long x0 __asm__("x0") = 1;' \
+            '  register const char *x1 __asm__("x1") = "BARE";' \
+            '  register long x2 __asm__("x2") = 4;' \
+            '  register long x8 __asm__("x8") = 64;' \
+            '  __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory");' \
+            '  x0 = 0; x8 = 93;' \
+            '  __asm__ volatile("svc #0" :: "r"(x0), "r"(x8));' \
+            '  __builtin_unreachable();' \
+            '}' > "$BUILD_ROOT/diag-bare.c"
+          printf 'int main(void){return 42;}\n' > "$BUILD_ROOT/diag-ret.c"
+          mkdir -p "$BUILD_ROOT/diag" "$BUILD_ROOT/rootfs$KODRA_PREFIX/bin"
+
+          if "$CC" -nostdlib -static -Wl,-e,_start "$BUILD_ROOT/diag-bare.c" \
+               -o "$BUILD_ROOT/diag/bare" 2>"$BUILD_ROOT/diag/bare.err"; then
+            cp "$BUILD_ROOT/diag/bare" "$BUILD_ROOT/rootfs$KODRA_PREFIX/bin/diag-bare"
+            r="$(kodra/bootstrap/android-runtime.sh run "$KODRA_PREFIX/bin/diag-bare" 2>&1)" && rc2=0 || rc2=$?
+            printf '::notice title=diag::freestanding rc=%s out=%s\n' "$rc2" "$(printf '%s' "$r" | cut -c1-100)"
+          else
+            printf '::notice title=diag::freestanding build failed: %s\n' \
+              "$(head -c 200 "$BUILD_ROOT/diag/bare.err" | tr '\n' ' ')"
+          fi
+
+          # 2. Backtrace. gdb runs natively here (runner and target are both aarch64)
+          #    and is told the chroot is its sysroot, so bionic's libraries resolve.
+          if "$CC" $ANDROID_CFLAGS "$BUILD_ROOT/diag-ret.c" -o "$BUILD_ROOT/diag/trace" \
+               $ANDROID_LDFLAGS 2>"$BUILD_ROOT/diag/trace.err"; then
+            cp "$BUILD_ROOT/diag/trace" "$BUILD_ROOT/rootfs$KODRA_PREFIX/bin/diag-trace"
+            sudo gdb -q -batch \
+              -ex "set sysroot $ROOT" \
+              -ex "set solib-absolute-prefix $ROOT" \
+              -ex "set solib-search-path $ROOT/system/lib64" \
+              -ex 'set pagination off' \
+              -ex 'set confirm off' \
+              -ex 'catch exec' \
+              -ex 'run' \
+              -ex 'continue' \
+              -ex 'bt 12' \
+              -ex 'x/8i $pc-16' \
+              -ex 'info registers x0 x1 x8 x9 sp x30' \
+              -ex 'info proc mappings' \
+              -ex 'x/i $pc' \
+              -ex 'info symbol $pc' \
+              --args "$(command -v chroot)" "$ROOT" "$KODRA_PREFIX/bin/diag-trace" \
+              >"$BUILD_ROOT/diag/gdb.log" 2>&1 || true
+            # The first instructions of .text are the crt's _start, so the faulting
+            # instruction can be located in the startup sequence rather than guessed at.
+            {
+              echo '### Startup code (crt _start)'
+              echo '```text'
+              objdump -d --section=.text "$BUILD_ROOT/diag/trace" | head -30
+              echo '### Relocations and dynamic symbols'
+              readelf -rW "$BUILD_ROOT/diag/trace" | head -20
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            printf '::notice title=startup::%s\n' \
+              "$(objdump -d --section=.text "$BUILD_ROOT/diag/trace" | head -14 | tr '\n' '~' | cut -c1-600)"
+            cat "$BUILD_ROOT/diag/gdb.log" >> "$GITHUB_STEP_SUMMARY"
+            # A program counter is not an answer; resolve it to a symbol and the
+            # instructions around it, and report what the link actually pulled in.
+            where="$(python3 kodra/bootstrap/lib/where.py \
+              "$BUILD_ROOT/diag/gdb.log" "$BUILD_ROOT/diag/trace" 2>&1 || true)"
+            printf '%s\n' "$where" >> "$GITHUB_STEP_SUMMARY"
+            printf '::notice title=fault::%s\n' \
+              "$(printf '%s' "$where" | head -3 | tr '\n' '~' | cut -c1-400)"
+            printf '::notice title=pulled-in::%s\n' \
+              "$(printf '%s' "$where" | sed -n '/dynamic section/,$p' | tr '\n' '~' | cut -c1-600)"
+          else
+            printf '::notice title=backtrace::build failed: %s\n' \
+              "$(head -c 200 "$BUILD_ROOT/diag/trace.err" | tr '\n' ' ')"
+          fi
+
+          # 3. What the binary asks the loader for, next to what the image provides.
+          {
+            echo '### Probe binary'
+            echo '```text'
+            readelf -lW "$BUILD_ROOT/toolchain-verify/hello" | grep -i interpreter || echo 'no interpreter'
+            readelf -dW "$BUILD_ROOT/toolchain-verify/hello" | grep -E 'NEEDED|FLAGS' || true
+            echo '### Image libraries'
+            ls "$ROOT/system/lib64" | head -30 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report Android runtime contents
+        if: always()
+        run: |
+          set -euo pipefail
+          root="${ANDROID_ROOT:-$BUILD_ROOT/android-root}"
+          {
+            echo '### Android userland'
+            echo '```text'
+            ls -l "$root/system/bin/linker64" 2>/dev/null || echo "no linker64"
+            ls "$root/system/lib64" 2>/dev/null | head -20 || echo "no lib64"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  bootstrap:
+    name: Build bootstrap + smoke tests
+    needs: probe
+    runs-on: ubuntu-24.04-arm
+    env:
+      # inputs is empty outside workflow_dispatch, so the fallback is the full list.
+      KODRA_PACKAGES: ${{ inputs.packages || 'zlib,bash,git,node,node-pty' }}
+    # Node's V8 and OpenSSL dominate this: on four ARM cores a from-source build of
+    # 24.22.1 is roughly an hour, and a cold cache adds the downloads.
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          # The workflow file itself is included so the lint step can check it.
+          sparse-checkout: |
+            kodra/bootstrap
+            .github/workflows/kodra-bootstrap.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Lint the bootstrap scripts and this workflow
+        run: |
+          set -euo pipefail
+          # The workflow check needs a YAML parser; the runner's python does not ship one.
+          python3 -m pip install --quiet --break-system-packages pyyaml \
+            || echo '::warning::pyyaml unavailable, workflow checks skipped'
+          python3 kodra/bootstrap/lib/lint.py
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4.0.4
+
+      - name: Install host build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm binutils e2fsprogs unzip xz-utils openssl zip gdb
+
+      - name: Install NDK
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          set -e
+          ci_trap "ndk"
+          for ndk in "ndk;27.2.12479018" "ndk;26.3.11579264"; do
+            if sdkmanager --install "$ndk" >"$RUNNER_TEMP/ndk.log" 2>&1; then
+              echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${ndk#ndk;}" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          done
+          ci_annotate_log "ndk" "$RUNNER_TEMP/ndk.log" '.'
+          exit 1
+
+      - name: Set up toolchain and Android userland
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          set -e
+          ci_trap "setup"
+          kodra/bootstrap/toolchain.sh env > "$RUNNER_TEMP/toolchain.log" 2>&1 || {
+            ci_annotate_log "toolchain-env" "$RUNNER_TEMP/toolchain.log" '.'
+            exit 1
+          }
+          # Values are shell-quoted in the file so it can be sourced locally; $GITHUB_ENV
+          # takes them literally, so the quotes have to come off or every downstream step
+          # would receive ANDROID_API='28' with the quotes baked into the value.
+          grep '^export ' build-out/toolchain/toolchain.env \
+            | sed -e 's/^export //' \
+            | sed -E "s/^([A-Za-z_][A-Za-z0-9_]*)='(.*)'\$/\1=\2/" \
+            >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/build-out/toolchain/bin" >> "$GITHUB_PATH"
+          kodra/bootstrap/android-runtime.sh install > "$RUNNER_TEMP/runtime.log" 2>&1 || {
+            ci_annotate_log "android-runtime" "$RUNNER_TEMP/runtime.log" '.'
+            exit 1
+          }
+          tail -n 5 "$RUNNER_TEMP/runtime.log" >> "$GITHUB_STEP_SUMMARY"
+
+      # A recipe whose upstream publishes no checksum file ships PKG_SHA256=PIN, and
+      # the build refuses it. This step reports those digests without enforcing them,
+      # so one run pins every remaining source and the build then enforces all of them.
+      - name: Report unpinned sources
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          unpinned="$(grep -l 'PKG_SHA256=PIN' kodra/bootstrap/packages/*.sh 2>/dev/null \
+            | xargs -r -n1 basename | sed 's/\.sh$//' | tr '\n' ' ' || true)"
+          if [ -z "${unpinned// /}" ]; then
+            ci_notice "pin" "every source is pinned; builds enforce their digests"
+            exit 0
+          fi
+          ci_notice "pin" "unpinned sources: $unpinned"
+          kodra/bootstrap/build.sh pin $unpinned || true
+
+      # Packages are built in dependency order, one step each, so a failure names the
+      # package instead of the whole bootstrap.
+      - name: Build zlib
+        if: contains(format(',{0},', env.KODRA_PACKAGES), ',zlib,')
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          set -e
+          ci_trap "zlib"
+          # ci_run annotates the failing output, because job logs are unreadable from
+          # the development sandbox; 'if !' keeps the ERR trap quiet about a failure
+          # that has already been reported with its cause.
+          if ! ci_run "zlib" "$RUNNER_TEMP/zlib.log" -- kodra/bootstrap/build.sh build zlib; then
+            exit 1
+          fi
+          tail -n 5 "$RUNNER_TEMP/zlib.log" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build bash
+        if: contains(format(',{0},', env.KODRA_PACKAGES), ',bash,')
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          set -e
+          ci_trap "bash"
+          # ci_run annotates the failing output, because job logs are unreadable from
+          # the development sandbox; 'if !' keeps the ERR trap quiet about a failure
+          # that has already been reported with its cause.
+          if ! ci_run "bash" "$RUNNER_TEMP/bash.log" -- kodra/bootstrap/build.sh build bash; then
+            exit 1
+          fi
+          tail -n 5 "$RUNNER_TEMP/bash.log" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build git
+        if: contains(format(',{0},', env.KODRA_PACKAGES), ',git,')
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          set -e
+          ci_trap "git"
+          # ci_run annotates the failing output, because job logs are unreadable from
+          # the development sandbox; 'if !' keeps the ERR trap quiet about a failure
+          # that has already been reported with its cause.
+          if ! ci_run "git" "$RUNNER_TEMP/git.log" -- kodra/bootstrap/build.sh build git; then
+            exit 1
+          fi
+          tail -n 5 "$RUNNER_TEMP/git.log" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build node
+        if: contains(format(',{0},', env.KODRA_PACKAGES), ',node,')
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          set -e
+          ci_trap "node"
+          # ci_run annotates the failing output, because job logs are unreadable from
+          # the development sandbox; 'if !' keeps the ERR trap quiet about a failure
+          # that has already been reported with its cause.
+          if ! ci_run "node" "$RUNNER_TEMP/node.log" -- kodra/bootstrap/build.sh build node; then
+            exit 1
+          fi
+          tail -n 5 "$RUNNER_TEMP/node.log" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build node-pty
+        if: contains(format(',{0},', env.KODRA_PACKAGES), ',node-pty,')
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          set -e
+          ci_trap "node-pty"
+          # ci_run annotates the failing output, because job logs are unreadable from
+          # the development sandbox; 'if !' keeps the ERR trap quiet about a failure
+          # that has already been reported with its cause.
+          if ! ci_run "node-pty" "$RUNNER_TEMP/node-pty.log" -- kodra/bootstrap/build.sh build node-pty; then
+            exit 1
+          fi
+          tail -n 5 "$RUNNER_TEMP/node-pty.log" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke tests inside the Android userland
+        if: env.KODRA_PACKAGES == 'zlib,bash,git,node,node-pty'
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          set -e
+          ci_trap "verify"
+          kodra/bootstrap/build.sh verify
+
+      - name: Pack bootstrap
+        if: always()
+        run: |
+          set -euo pipefail
+          . kodra/bootstrap/lib/ci.sh
+          set -e
+          prefix="build-out/rootfs/data/data/dev.sonixdevs.kodra/files/usr"
+          if [ -d "$prefix" ] && [ -n "$(ls -A "$prefix" 2>/dev/null)" ]; then
+            if ( cd "$prefix" && zip -qry "$GITHUB_WORKSPACE/kodra-bootstrap-aarch64.zip" . ); then
+              sha256sum kodra-bootstrap-aarch64.zip | tee -a "$GITHUB_STEP_SUMMARY"
+              ls -la "$prefix/bin" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              ci_error "pack" "zip failed for $prefix"
+            fi
+          else
+            ci_notice "pack" "no prefix produced; nothing to pack"
+          fi
+
+      - name: Upload bootstrap
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: kodra-bootstrap-aarch64
+          path: kodra-bootstrap-aarch64.zip
+          if-no-files-found: warn
+          retention-days: 14

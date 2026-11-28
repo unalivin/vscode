@@ -54,13 +54,17 @@ jobs:
         run: |
           log="$RUNNER_TEMP/gradle-build.log"
           test -s "$log" || exit 0
+          # Kotlin, AAPT2, the manifest merger and Gradle itself each phrase failures
+          # differently; all four patterns have to be collected or the annotation is
+          # useless from outside the run.
+          patterns='^e: |^w: .*error|error:|AAPT:|Android resource linking failed|Android resource compilation failed|Manifest merger failed|FAILURE: Build failed|What went wrong|Caused by:|> Task .*FAILED'
           {
             echo '### Gradle build failure'
             echo '```text'
-            grep -E '^e: |error:|What went wrong' -A3 "$log" | head -80 || true
+            grep -E "$patterns" -A2 "$log" | head -120 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          { grep -E '^e: |What went wrong' -A2 "$log" || true; } | head -40 | while IFS= read -r line; do
+          { grep -E "$patterns" -A1 "$log" || true; } | head -60 | while IFS= read -r line; do
             escaped="${line//'%'/'%25'}"
             escaped="${escaped//$'\r'/'%0D'}"
             echo "::error title=Gradle::${escaped}"
@@ -75,6 +79,7 @@ jobs:
           retention-days: 14
 
       - name: Android Lint
+        if: always()
         working-directory: kodra/android
         continue-on-error: true
         run: gradle --no-daemon :app:lintDebug --stacktrace

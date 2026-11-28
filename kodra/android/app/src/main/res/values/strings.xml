@@ -5,6 +5,13 @@
     <string name="notification_title">Kodra is running</string>
     <string name="notification_text">Local server on %1$s — tap to open</string>
     <string name="notification_stop">Stop</string>
+    <string name="auth_channel_name">Kodra sign-in</string>
+    <string name="auth_channel_desc">GitHub device sign-in</string>
+    <string name="auth_notification_title">GitHub sign-in</string>
+    <string name="auth_notification_code">Enter code %1$s at github.com/login/device</string>
+    <string name="auth_notification_success">Signed in to GitHub</string>
+    <string name="auth_notification_failure">Sign-in failed: %1$s</string>
     <string name="err_content_uri">This file provider does not expose a filesystem path. Please choose a file from “Kodra” or device storage, or copy it into /storage/emulated/0/Kodra first.</string>
     <string name="err_no_browser">No browser app found to open %s</string>
+    <string name="err_server_unreachable">Kodra server is not reachable: %1$s</string>
 </resources>

@@ -1,77 +1,104 @@
 package dev.sonixdevs.kodra
 
+import android.net.Uri
 import android.webkit.WebView
-import android.webkit.WebMessageListener
-import android.webkit.JavaScriptReplyProxy
+import androidx.webkit.JavaScriptReplyProxy
+import androidx.webkit.WebMessageCompat
+import androidx.webkit.WebViewCompat
 import org.json.JSONObject
 
 /**
- * WebMessagePort bridge — replaces addJavascriptInterface. Workbench calls
- * `window.kodra.postMessage({method, params})` and we reply via `JsReplyProxy`.
- * Only allowlisted methods in KodraBridgeWhiteList.
+ * WebMessagePort bridge — the only script-visible surface of the app.
+ *
+ * The workbench calls `window.kodra.postMessage(JSON.stringify({id, method, params}))`
+ * and receives `{id, result}` or `{id, error}` back. Every method must be present in
+ * [KodraBridgeWhiteList]; anything else is refused without touching a platform API,
+ * so a compromised workbench page cannot reach arbitrary device functionality.
+ *
+ * Listener semantics come from AndroidX WebKit (`WebViewCompat.addWebMessageListener`);
+ * the platform `WebView` class has no such API, and the feature is offered by the
+ * updatable WebView provider rather than by the OS version.
  */
 class WorkbenchBridge(
     private val activity: MainActivity,
+    private val webView: WebView,
     private val filePicker: FilePickerBridge
 ) {
-    fun listener(): WebMessageListener = WebMessageListener { _, message, _, replyProxy, _ ->
-        handle(message, replyProxy)
-    }
+    fun listener(): WebViewCompat.WebMessageListener =
+        WebViewCompat.WebMessageListener { _, message: WebMessageCompat, _: Uri?, _: Boolean, reply: JavaScriptReplyProxy ->
+            handle(message.data ?: "", reply)
+        }
 
     private fun handle(message: String, reply: JavaScriptReplyProxy) {
+        val request = runCatching { JSONObject(message) }.getOrElse {
+            send(reply, errorResponse("", "malformed request"))
+            return
+        }
+        val id = request.optString("id", "")
+        val method = request.optString("method", "")
+        if (method !in KodraBridgeWhiteList.allowedMethods) {
+            send(reply, errorResponse(id, "unsupported method"))
+            return
+        }
+        val params = request.optJSONObject("params")
         runCatching {
-            val req = JSONObject(message)
-            val method = req.optString("method", "")
-            val id = req.optString("id", "")
-            if (method !in KodraBridgeWhiteList.allowedMethods) {
-                reply("{\"id\":\"$id\",\"error\":\"forbidden method\"}", reply); return
-            }
             when (method) {
-                "clipboard.readText" -> {
-                    val t = ClipboardBridge.readText(activity) ?: ""
-                    reply("{\"id\":\"$id\",\"result\":${JSONObject.quote(t)}}", reply)
-                }
+                "clipboard.readText" ->
+                    send(reply, resultResponse(id, ClipboardBridge.readText(activity) ?: ""))
                 "clipboard.writeText" -> {
-                    val text = req.optString("params", "")
-                    ClipboardBridge.writeText(activity, text)
-                    reply("{\"id\":\"$id\",\"result\":true}", reply)
+                    ClipboardBridge.writeText(activity, params?.optString("text", "") ?: "")
+                    send(reply, resultResponse(id, true))
                 }
-                "dialog.openFile" -> {
-                    filePicker.pickFile { res ->
-                        res.onSuccess { reply("{\"id\":\"$id\",\"result\":${JSONObject.quote(it)}}", reply) }
-                            .onFailure { reply("{\"id\":\"$id\",\"error\":${JSONObject.quote(it.message?:"")}}} ", reply) }
-                    }
-                }
-                "dialog.openFolder" -> {
-                    filePicker.pickFolder { res ->
-                        res.onSuccess { reply("{\"id\":\"$id\",\"result\":${JSONObject.quote(it)}}", reply) }
-                            .onFailure { reply("{\"id\":\"$id\",\"error\":${JSONObject.quote(it.message?:"")}}} ", reply) }
-                    }
-                }
+                // The picker answers asynchronously, so the reply is posted from its callback.
+                "dialog.openFile" -> filePicker.pickFile { res -> replyPicked(id, res, reply) }
+                "dialog.openFolder" -> filePicker.pickFolder { res -> replyPicked(id, res, reply) }
                 "auth.githubDeviceFlow" -> {
                     val clientId = GithubAuth.getClientId(activity)
-                    if (clientId == null) { reply("{\"id\":\"$id\",\"error\":\"no client_id\"}", reply); return }
-                    // Scaffold reply — real polling is via DeviceAuthFlow coroutines launched by Activity
-                    reply("{\"id\":\"$id\",\"result\":\"device_flow_started\"}", reply)
+                    if (clientId == null) send(reply, errorResponse(id, "no GitHub OAuth client id configured"))
+                    else send(reply, resultResponse(id, DeviceAuthFlow.start(activity, clientId)))
                 }
-                "auth.getToken" -> {
-                    val tok = GithubAuth.loadToken(activity)
-                    reply("{\"id\":\"$id\",\"result\":${if (tok != null) JSONObject.quote(\"***\") else "null"}}", reply)
+                // The token itself never crosses the bridge: the workbench only needs to
+                // know whether an account is signed in and must use the credential helper.
+                "auth.getToken" -> send(reply, resultResponse(id, GithubAuth.loadToken(activity) != null))
+                "auth.clearToken" -> {
+                    GithubAuth.clearToken(activity)
+                    send(reply, resultResponse(id, true))
                 }
-                "auth.clearToken" -> { GithubAuth.clearToken(activity); reply("{\"id\":\"$id\",\"result\":true}", reply) }
-                "service.stop" -> { activity.stopService(android.content.Intent(activity, KodraService::class.java)); reply("{\"id\":\"$id\",\"result\":true}", reply) }
-                "service.reconnect" -> { KodraService.start(activity); reply("{\"id\":\"$id\",\"result\":true}", reply) }
-                "insets.get" -> reply("{\"id\":\"$id\",\"result\":true}", reply)
+                "service.stop" -> {
+                    activity.stopService(android.content.Intent(activity, KodraService::class.java))
+                    send(reply, resultResponse(id, true))
+                }
+                "service.reconnect" -> {
+                    KodraService.start(activity)
+                    send(reply, resultResponse(id, true))
+                }
                 "insets.setImmersive" -> {
-                    val enabled = req.optJSONObject("params")?.optBoolean("enabled", true) ?: true
-                    activity.runOnUiThread { InsetsBridge.setImmersive(activity, activity.webViewForBridge(), enabled) }
-                    reply("{\"id\":\"$id\",\"result\":true}", reply)
+                    val enabled = params?.optBoolean("enabled", true) ?: true
+                    activity.runOnUiThread { InsetsBridge.setImmersive(activity, webView, enabled) }
+                    send(reply, resultResponse(id, true))
                 }
+                else -> send(reply, errorResponse(id, "unsupported method"))
             }
-        }.onFailure { e -> reply("{\"error\":${JSONObject.quote(e.message?:"")}}} ", reply) }
+        }.onFailure { e ->
+            send(reply, errorResponse(id, e.message ?: e::class.java.simpleName))
+        }
     }
 
-    private fun reply(json: String, proxy: JavaScriptReplyProxy) {
-        try { proxy.postMessage(json) } catch (_: Exception) {}
+    private fun replyPicked(id: String, result: Result<String>, reply: JavaScriptReplyProxy) {
+        result.fold(
+            onSuccess = { send(reply, resultResponse(id, it)) },
+            onFailure = { send(reply, errorResponse(id, it.message ?: "picker failed")) }
+        )
+    }
+
+    private fun resultResponse(id: String, value: Any): String =
+        JSONObject().put("id", id).put("result", value).toString()
+
+    private fun errorResponse(id: String, message: String): String =
+        JSONObject().put("id", id).put("error", message).toString()
+
+    private fun send(reply: JavaScriptReplyProxy, json: String) {
+        // The page can be torn down while a picker is open; posting then throws.
+        runCatching { reply.postMessage(json) }
     }
 }

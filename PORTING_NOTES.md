@@ -10,15 +10,137 @@
 
 ## Stage progress
 
+The status vocabulary is fixed: **Done (evidence: …)**, **Scaffolded, unverified**,
+**Blocked on owner**. Earlier revisions of this table called Stages 2–6 "Complete" while
+no Android build had ever succeeded; that was wrong and is corrected below.
+
 | Stage | State | Notes |
 | --- | --- | --- |
-| 0 — audit and plan | **Complete** | Source map, architecture decisions and owner choices recorded below; Stage 1 was approved. |
-| 1 — rebrand and CI | **Complete (2026-11-26)** | CI builds, asserts and uploads both Linux ARM64 packages, runs each packaged server on a native ARM64 runner to check its loopback bind, port-0 handoff, token enforcement, served workbench content and product-level service gating, and emits a per-package host inventory. Final green: `45707121359` on `a5831013` (docs-only `cc1bdbbc` follows). Outbound-service review below: every Microsoft host is removed or product-gated and enforced in CI; no network trace available in this sandbox. |
-| 2 — bootstrap | **Complete (2026-11-26)** | `kodra/README.md`, `kodra/BOOTSTRAP.md`, `kodra/TOOLCHAIN.md`, `kodra/prefix-layout.json` and `kodra/deps/INVENTORY.md` (51 deps, 0 unknown: rebuild=5 / replace=2 / omit=2 / binary=42) define the Termux-style `$PREFIX` toolchain for NDK r26+ `aarch64-linux-android28` Node 24.22.1. CI gates inventory sync (`Verify bootstrap inventory is up to date`). |
-| 3 — Android shell | **Complete (2026-11-26)** | `kodra/android/` single-Activity WebView + foreground service: `MainActivity` (edge-to-edge, `shouldOverrideUrlLoading` 127.0.0.1 allowlist → `Intent`), `KodraService` (partial `WakeLock`, Stop action, per-launch `TokenManager`), `BootstrapInstaller` + `ServerProcess` (redacted `?tkn=`), `FilePickerBridge`+`PermissionHandler` (SAF → POSIX, content-only error), `InsetsBridge`/`ExtraKeysView`/`ClipboardBridge`/`WorkbenchBridge` (`WebMessagePort` allowlist), `SettingsActivity` (immersive + battery), `.github/workflows/kodra-android.yml` (`assembleDebug`+`lint`). |
-| 4 — terminal, Git, GitHub login | **Complete (2026-11-26)** | `TerminalBridge` (xterm.js + `node-pty` with `TERM=xterm-256color`, extra-keys row), `GitBridge` (bootstrap `git` + credential helper → Keystore), `GithubAuth` + `DeviceAuthFlow` (Device Flow polling `slow_down`/`expired_token`, `AndroidKeyStore` AES-GCM, `local.properties.example` ignored), `docs/sample-settings.json` (round-trip incl. not-installed ext keys). |
-| 5 — bundled extensions | **Complete (2026-11-26)** | `docs/EXTENSIONS.md` source-of-truth (MIT pin table for 3 bundled js-debug/profile `product.json`, review steps for Prettier/Material/LiveServer/Python/PR/Discord); `ms-vscode.cpptools` excluded (bootstrap clangd docs). |
-| 6 — touch, release and docs | **Complete (2026-11-26)** | `kodra/RELEASE.md` + `.github/workflows/kodra-release.yml` (GitHub Releases only, `targetSdk 28`, signing via `secrets.KODRA_KEYSTORE_*`), `docs/BATTERY.md` (phantom-process/Doze/OEM pin) + `docs/ARCHITECTURE.md` (end-to-end diagram) + `kodra/android/README.md` (Insets/IME/extra-keys, `chrome://inspect`), `kodra/android/app/src/main/assets/README.md` (bootstrap/REH packaging). Device checklist in `RELEASE.md` is the Stage 6 gate. |
+| 0 — audit and plan | Done (evidence: this document) | Source map, architecture decisions and owner choices recorded below; Stage 1 was approved. |
+| 1 — rebrand and CI | Done (evidence: run `45707121359` on `a5831013`, `unalivin/vscode`) | That run built, asserted and uploaded both Linux ARM64 packages and ran each packaged server on a native ARM64 runner to check its loopback bind, port-0 handoff, token enforcement, served workbench content and product-level service gating. It is historical evidence from the fork; re-verification in this repository is tracked in the 2026-11-27 section below. |
+| 2 — bootstrap | Partial evidence: the toolchain and execution path are proven, the packages are not | CI builds Android binaries and executes them on the real `linker64`/bionic from an official arm64 system image (see 2026-11-27 above). `kodra/bootstrap/build.sh` compiles zlib, bash, git, Node 24.22.1 and `node-pty` from upstream source into the staged prefix; whether those five build and pass their smoke tests is tracked by the bootstrap workflow, and nothing has been installed on a device. `kodra/README.md`, `BOOTSTRAP.md`, `TOOLCHAIN.md`, `prefix-layout.json` and `deps/INVENTORY.md` (51 deps, 0 unknown: rebuild=5 / replace=2 / omit=2 / binary=42) remain the specification. |
+| 3 — Android shell | Scaffolded, unverified | `kodra/android/` (single-Activity WebView + foreground service + bridges) now compiles to a debug APK in this repository (see 2026-11-27 below). Nothing has been installed or launched on a device, and the shell has no bootstrap or REH package to start yet. |
+| 4 — terminal, Git, GitHub login | Scaffolded, unverified | `GitBridge` (safe.directory for the shared folder), `GithubAuth` + `DeviceAuthFlow` (Device Flow, AndroidKeyStore AES-GCM, no plaintext token on disk). The terminal is REH's own xterm.js + `node-pty` and has no Kotlin counterpart; it needs the bionic `node-pty` build, which does not exist. The workbench-side `github` authentication provider and the git credential helper are not written yet. |
+| 5 — bundled extensions | Scaffolded, unverified | `docs/EXTENSIONS.md` is the source of truth: only the three MIT js-debug/profile extensions are pinned in `product.json`; Prettier, Material Icon Theme, Live Server, Python, PR/Discord are reviewed but not bundled. `ms-vscode.cpptools` stays excluded in favour of bootstrap clangd/LLDB. |
+| 6 — touch, release and docs | Scaffolded, unverified | `kodra/RELEASE.md`, `kodra-release.yml` (fails loudly without a keystore), `docs/BATTERY.md`, `docs/ARCHITECTURE.md`, `kodra/android/README.md`. No signed APK exists and no touch/IME/immersive claim has been tested on a device. |
+
+## 2026-11-27 — first green Android build and REH re-verification
+
+Branch `arena/cf79b233-kodra`, PR [#6](https://github.com/Sonix-Devs/Kodra/pull/6), commit
+`9d320a33b721b3a0e2d68c4ab8393045e90777cd`. Both Kodra workflows are green on that commit:
+
+| Workflow | Result | Evidence |
+| --- | --- | --- |
+| Kodra Android Debug APK | success | [run 46038357171](https://github.com/Sonix-Devs/Kodra/actions/runs/46038357171) — `assembleDebug` and `lintDebug` both succeeded; artifacts `kodra-debug-apk` (4,829,579 B) and `kodra-lint-report` (23,459 B) |
+| Kodra Linux ARM64 REH | success | [run 46038357337](https://github.com/Sonix-Devs/Kodra/actions/runs/46038357337) — build, in-package assertions, inventory sync and the packaged-server runtime job all succeeded; artifacts `vscode-reh-linux-arm64` (186,432,472 B), `vscode-reh-web-linux-arm64` (219,456,542 B), `kodra-host-inventory` (2,809 B) |
+
+That is the first time any Android build in this project has produced an APK. It is not
+device evidence: the APK has never been installed, and it contains no bootstrap and no
+REH package, so on a device it would show the "server failed to start" notification.
+
+### Defects found and fixed (each one blocked the build or a requirement)
+
+1. **No `gradle.properties`** — `android.useAndroidX` was unset while every dependency is
+   an AndroidX artifact, so `:app:checkDebugAarMetadata` failed before compilation.
+2. **`<adaptive-icon>` in `res/mipmap/`** — AAPT rejects it below `minSdk 26`; the icons
+   moved to `mipmap-anydpi-v26/` with a layer-list fallback for API 21–25.
+3. **`android:windowEdgeToEdge` in `themes.xml`** — not a framework attribute; this was
+   the `:app:processDebugResources` failure. Bar visibility is runtime state and belongs
+   to `InsetsBridge`.
+4. **`android.webkit.WebMessageListener` / `JavaScriptReplyProxy`** — neither exists; web
+   message listeners are an AndroidX WebKit feature. `WorkbenchBridge` now uses
+   `WebViewCompat.addWebMessageListener` behind `WebViewFeature.isFeatureSupported`, with
+   an `http://127.0.0.1:*` origin rule that matches the served workbench.
+5. **The bridge emitted malformed JSON** — two branches built strings with a stray `}`,
+   and the reply proxy parameter shadowed the reply function. Requests and responses are
+   now built with `JSONObject`.
+6. **`coroutineContext[SupervisorJob]`** — `SupervisorJob` is a factory, not a context key,
+   so the service could not cancel its scope. The service keeps the job and cancels it.
+7. **Bound port read from a private field** — the activity now holds the service's
+   `LocalBinder`, which exposes the port only while the server process is alive.
+8. **`File.isExecutable`** — not a `kotlin.io` extension; `canExecute()` is the Java API.
+9. **Immersion did nothing** — `layoutInDisplayCutoutMode` was written into a discarded
+   `LayoutParams` copy and the bars were never hidden. Both are fixed, and the WebView is
+   now padded by the IME/navigation-bar inset so the keyboard cannot cover the workbench.
+10. **`--without-connection-token` next to `--connection-token-file`** — a hard parse error
+    in `serverConnectionToken.ts` (the server refuses to start) that would also have
+    disabled authentication. Removed; the token file is the only credential.
+11. **Missing `lifecycle-runtime-ktx` / `kotlinx-coroutines-android`** — `lifecycleScope`
+    and `Dispatchers` would not resolve; both are now declared.
+12. **Plaintext GitHub token on disk** — `GithubAuth` wrote `filesDir/github-token`
+    in clear. The token is now Keystore-only, and git fails closed until the loopback
+    credential helper exists.
+13. **Dead and fake code removed** — `TerminalBridge` (no Kotlin terminal counterpart
+    exists; the PTY lives in the REH process), `ensurePtyAvailable`'s `|| true`,
+    `FilePickerBridge`'s always-null fallback, `PermissionHandler.checkAndPrompt`, and the
+    unused `core-splashscreen` dependency.
+
+### Also in this commit set
+
+- **Deterministic inventory** — `INVENTORY.md` embedded the generation date, so the
+  `git diff --exit-code` gate broke every day after the commit; the generator no longer
+  emits a date and sorts with ASCII comparison instead of `localeCompare` (which varies
+  with the runner's ICU/LANG).
+- **Release signing** — `signingConfigs.release` is built from `KODRA_KEYSTORE`,
+  `KODRA_KEYSTORE_PASSWORD`, `KODRA_KEY_ALIAS` and `KODRA_KEY_PASSWORD`; any task graph
+  containing a `*Release*` task fails at configuration time when they are missing or the
+  keystore is not readable. `kodra-release.yml` refuses to run without
+  `KODRA_KEYSTORE_BASE64` and derives `versionName`/`versionCode` from the tag and run
+  number. **No signed APK has been produced**, so this is scaffolded, not verified.
+- **Diagnostics that survive the sandbox** — Actions job logs are served from Azure blob
+  storage, which this environment cannot reach, so `gh api .../jobs/<id>/logs` fails. Both
+  workflows now surface Kotlin, AAPT2, manifest-merger and Gradle failures as annotations,
+  which is how the 13 defects above were found.
+- **About text** — the workbench already localises "Based on Code - OSS" in
+  `src/vs/workbench/browser/parts/dialogs/dialog.ts` (`createBrowserAboutDialogDetails`),
+  so no product change is needed for that requirement. Not verified on a device.
+
+### Still not proven
+
+- No APK has been installed; nothing here is device evidence.
+- The APK cannot start a server: there is no bionic Node and no REH package inside it.
+- The bootstrap, `node-pty`, git, terminal, GitHub sign-in, extensions, touch/IME and
+  background survival remain exactly as unverified as before.
+
+## 2026-11-27 — bionic execution proven in CI (bootstrap milestone 1)
+
+**Done (evidence: bootstrap run `46062427713`, job "Toolchain + Android runtime probe"):**
+an Android binary built in this repository ran on Android's own dynamic linker.
+The probe reports `kodra-probe ok uid=0 page=4096` from inside a chroot whose
+`/system` is the official `system-images;android-28;default;arm64-v8a` image
+(checksum-verified download, ext4 found behind the image's GPT) and whose
+`/data/data/dev.sonixdevs.kodra/files` is the staged prefix. The compiler is
+clang 18 on the ARM64 runner with `--target=aarch64-linux-android28` and the NDK's
+sysroot; the executed loader is the image's `/system/bin/linker64`, not a shim.
+
+What this does and does not mean:
+
+- Proven: the toolchain emits Android binaries (`linker64` interpreter, no glibc
+  symbol versions, Android ABI note, imports bionic `libc.so`); bionic's linker
+  resolves them and the process runs on a native aarch64 core.
+- **Not proven: a device.** The kernel is the runner's Linux kernel, not an OEM
+  Android one; SELinux, the Android permission model, Play services, the app
+  sandbox, the low-memory killer and 16 KB-page devices are all absent. Every
+  device-level claim in this document stays unverified until an APK runs on
+  hardware.
+
+### Defects this milestone exposed (each one stopped the build)
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Step 6 died silently | unquoted heredoc in `toolchain.sh` expanded `$PREFIX` in a comment under `set -u` | no `$name` in that heredoc; comment rewritten |
+| `Invalid format '…'` from the runner | `$GITHUB_ENV` takes KEY=VALUE only, and `toolchain.env` carries comments *and* shell quoting | filter to `export ` lines and strip the quotes |
+| `cannot find -lgcc` | host clang picks the gcc runtime for this triple; the NDK ships only compiler-rt | `--rtlib=compiler-rt` |
+| `cannot open …/llvm-18/…/libclang_rt.builtins-aarch64-android.a` | the driver resolves compiler-rt from *its own* resource directory | `-resource-dir` pointing at the NDK's clang tree |
+| no arm64 system image installed | `sdkmanager` treats the emulator package as a hard dependency | read the repository index, verify its checksum, unpack into sdkmanager's layout |
+| `bad superblock` mounting `system.img` | the image is a GPT disk image, not the system partition | locate the ext4 superblock (offset 0 / MBR / GPT) and mount there, then bind its `system/` |
+| PTY tests would have failed later | `--bind` hides `/dev/pts`, which is a separate mount | `--rbind` + `rslave` |
+| **probe segfaulted at 0x0 before `main`** | extra `-L` entries made `-lc` resolve to the NDK's `libc.a`: the binary carried a private libc that bionic's linker never initialises | drop the `-L` list; `verify` now rejects a binary that defines `getauxval`/`__libc_init` or does not import `libc.so` |
+
+The last one is the one to remember: the binary had a perfect interpreter, a
+correct ABI note and no glibc symbols, yet could never have run. Only executing
+it caught that, and only a symbol-resolved backtrace (`kodra/bootstrap/lib/where.py`)
+named it.
 
 ## Stage 1 verification (2026-11-20 → 2026-11-26 complete)
 

@@ -1,9 +1,10 @@
 <resources>
-    <!-- Edge-to-edge, no ActionBar — Activity draws behind system bars -->
+    <!-- Edge-to-edge, no ActionBar — the Activity draws behind the system bars and
+         the bar visibility is controlled at runtime by InsetsBridge (immersive
+         toggle), so the bars are transparent here rather than themed. -->
     <style name="Theme.Kodra" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowEdgeToEdge">true</item>
     </style>
 </resources>

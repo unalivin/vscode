@@ -4,60 +4,52 @@ import android.content.Context
 import java.io.File
 
 /**
- * Stage 4: Git bridge — built-in Git extension stays, but its `git` binary is the bootstrap one.
+ * Git wiring for the built-in Git extension. The extension itself is unmodified; Kodra
+ * only has to make sure it finds the bootstrap binary and can read the owner's shared
+ * project folders.
  *
- * Workbench `extensions/git` discovers `git` via:
- *   `git.path` setting → else `$PATH` → else `which git`
- * Kodra sets:
- *   `git.path = $PREFIX/bin/git` (via default settings + user settings.json)
- *   `PATH = $PREFIX/bin:...` (BootstrapInstaller.busyBoxEnv)
+ * `git.path` and `PATH` are set here because the extension resolves the binary from
+ * `git.path`, then `$PATH`, then `which git` — the app process environment is the only
+ * place that knows where the bootstrap lives.
  *
- * Credential helper: `git config --global credential.helper '!f() { echo \"username=oauth\"; echo \"password=$(cat $FILES/token)\"; }; f'`
- * is wrong — we use a real helper that reads Keystore (see GithubAuth) and prints `password=<token>`.
- *
- * This Kotlin file installs the helper script and configures `git config` on first launch.
+ * Credential helper: not installed yet, deliberately. The signed-in token lives in the
+ * Android Keystore ([GithubAuth]), which a shell script cannot open, and the planned
+ * helper is a node client of a loopback channel served by this process. Until the
+ * bootstrap node exists (Stage 5), `git` therefore has no stored credential and fails
+ * closed instead of finding a token on disk.
  */
 object GitBridge {
-    private const val HELPER_NAME = "kodra-credential-helper"
+    private const val SAFE_DIRECTORY = "/storage/emulated/0/Kodra"
 
-    fun install(context: Context, layout: BootstrapInstaller.Layout) {
-        val bin = File(layout.prefix, "bin")
-        val helper = File(bin, HELPER_NAME)
-        // Helper script — reads token from Keystore via `kodra` CLI shim (Stage 4)
-        // Scaffold: write script that echoes token from filesDir/git-token (populated by GithubAuth)
-        helper.writeText(
-            """
-            #!/system/bin/sh
-            # Kodra Git credential helper — called as: $HELPER_NAME get / store / erase
-            # For scaffold, token is at ${context.filesDir.absolutePath}/github-token
-            if [ "${'$'}1" = "get" ]; then
-              if [ -f "${context.filesDir.absolutePath}/github-token" ]; then
-                echo "username=git"
-                echo "password=$(cat "${context.filesDir.absolutePath}/github-token")"
-              fi
-            fi
-            """.trimIndent()
-        )
-        helper.setExecutable(true)
+    /** Idempotent; safe to call at every start. No-op until the bootstrap provides git. */
+    fun configure(context: Context) = configure(context, BootstrapInstaller.layout(context))
 
-        // Configure git — run `git config --global credential.helper <helper>`
-        // Real: Runtime.exec("$PREFIX/bin/git config --global credential.helper $helper")
-        // Scaffold: skip exec on emulator without bootstrap
-        val git = File(bin, "git")
-        if (!git.exists()) return
+    fun configure(context: Context, layout: BootstrapInstaller.Layout) {
+        val git = File(layout.prefix, "bin/git")
+        if (!git.canExecute()) return
+
+        // Shared storage is owned by the media provider identity, not by the app UID, so
+        // git refuses to operate on it without an explicit safe.directory entry.
+        gitConfig(git, layout, "safe.directory", SAFE_DIRECTORY)
+
+        // Pin the binary for the extension and keep it ahead of any system git.
+        gitConfig(git, layout, "kodra.prefix", layout.prefix.absolutePath)
+    }
+
+    private fun gitConfig(git: File, layout: BootstrapInstaller.Layout, key: String, value: String) {
         runCatching {
-            ProcessBuilder(git.absolutePath, "config", "--global", "credential.helper", helper.absolutePath)
-                .apply { environment()["HOME"] = layout.home.absolutePath }
-                .start().waitFor()
-        }
-        // Also set safe.directory for /storage/emulated/0/Kodra (owner's shared projects)
-        runCatching {
-            ProcessBuilder(git.absolutePath, "config", "--global", "--add", "safe.directory", "/storage/emulated/0/Kodra")
-                .apply { environment()["HOME"] = layout.home.absolutePath }
-                .start().waitFor()
+            ProcessBuilder(git.absolutePath, "config", "--global", "--replace-all", key, value)
+                .apply {
+                    environment()["HOME"] = layout.home.absolutePath
+                    environment()["PREFIX"] = layout.prefix.absolutePath
+                    environment()["PATH"] = "${layout.prefix.absolutePath}/bin"
+                }
+                .redirectErrorStream(true)
+                .start()
+                .waitFor()
         }
     }
 
     fun isAvailable(layout: BootstrapInstaller.Layout): Boolean =
-        File(layout.prefix, "bin/git").exists()
+        File(layout.prefix, "bin/git").canExecute()
 }

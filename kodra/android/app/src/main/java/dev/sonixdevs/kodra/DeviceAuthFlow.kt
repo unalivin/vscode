@@ -3,18 +3,35 @@ package dev.sonixdevs.kodra
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * GitHub Device Flow — completes TODO in GithubAuth.kt.
- * Network calls are plain HttpURLConnection (no extra dep) and are testable via
- * GithubAuthTest (not in this sandbox). The UI shows user_code + opens verification_uri.
+ * GitHub OAuth Device Flow (RFC 8628), used because an installed APK cannot keep a
+ * client secret. The client ID comes from `local.properties` at build time and is
+ * never a secret on its own; the resulting token is encrypted with the Android
+ * Keystore by [GithubAuth] and never crosses the WebView bridge.
+ *
+ * The flow is asynchronous: [start] returns immediately so the workbench message
+ * handler is not blocked on the network, and progress is surfaced through
+ * notifications (the user code must stay visible while the user types it in a
+ * browser, which a workbench toast cannot guarantee).
  */
 object DeviceAuthFlow {
+    private const val TAG = "KodraAuth"
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val inFlight = AtomicBoolean(false)
+
     data class DeviceCode(
         val deviceCode: String,
         val userCode: String,
@@ -53,6 +70,53 @@ object DeviceAuthFlow {
             if (err.isNotEmpty()) throw IllegalStateException("Device flow error: $err - $json")
         }
         throw IllegalStateException("Device flow timed out")
+    }
+
+    /**
+     * Starts the flow and returns at once.
+     *
+     * @return `{"status":"started"}` so the caller can tell "sign-in begun" from
+     *   "already running" or "no client id".
+     */
+    fun start(context: Context, clientId: String): JSONObject {
+        val app = context.applicationContext
+        if (!inFlight.compareAndSet(false, true)) {
+            return JSONObject().put("status", "in_progress")
+        }
+        val title = app.getString(R.string.auth_notification_title)
+        scope.launch {
+            try {
+                val code = requestDeviceCode(clientId)
+                NotificationHelper.showAuth(
+                    app,
+                    title,
+                    app.getString(R.string.auth_notification_code, code.userCode)
+                )
+                openVerification(app, code)
+                val token = pollForToken(clientId, code.deviceCode, code.interval, code.expiresIn)
+                GithubAuth.storeToken(app, token.accessToken)
+                GitBridge.configure(app)
+                NotificationHelper.showAuth(
+                    app,
+                    title,
+                    app.getString(R.string.auth_notification_success)
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // The message can carry the OAuth error code, never the token: the token
+                // response is only parsed into [TokenResponse] on the success path.
+                Log.w(TAG, "Device flow failed: ${e.message}")
+                NotificationHelper.showAuth(
+                    app,
+                    title,
+                    app.getString(R.string.auth_notification_failure, e.message ?: "")
+                )
+            } finally {
+                inFlight.set(false)
+            }
+        }
+        return JSONObject().put("status", "started")
     }
 
     fun openVerification(context: Context, deviceCode: DeviceCode) {

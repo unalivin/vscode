@@ -14,7 +14,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import java.io.File
 
 /**
  * Foreground service that owns the local Node server and PTY tree.
@@ -24,19 +23,17 @@ import java.io.File
  * Reconnect: onBind returns same binder; server is not restarted on config change.
  */
 class KodraService : Service() {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val job = SupervisorJob()
+    private val scope = CoroutineScope(job + Dispatchers.IO)
     private var wakeLock: PowerManager.WakeLock? = null
     private var server: ServerProcess? = null
     private var bound: ServerProcess.Bound? = null
-    private var tokenFile: File? = null
 
     private val binder = LocalBinder()
 
     inner class LocalBinder : Binder() {
-        fun service(): KodraService = this@KodraService
-        fun bound(): ServerProcess.Bound? = bound
-        fun tokenFile(): File? = tokenFile
-        fun isReady(): Boolean = bound != null && server?.isAlive() == true
+        /** Host/port once the server has bound; null while it is still starting. */
+        fun bound(): ServerProcess.Bound? = bound.takeIf { server?.isAlive() == true }
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -54,11 +51,13 @@ class KodraService : Service() {
                 val layout = BootstrapInstaller.installIfNeeded(this@KodraService)
                 val token = TokenManager.generate()
                 val tf = TokenManager.writeToken(this@KodraService, token)
-                tokenFile = tf
                 val srv = ServerProcess(this@KodraService)
                 server = srv
                 val b = srv.start(tf, layout)
                 bound = b
+                // The bootstrap git must know the shared project folder before the
+                // built-in Git extension starts asking it questions.
+                GitBridge.configure(this@KodraService, layout)
                 wakeLock?.acquire(10 * 60 * 60 * 1000L /*10h*/)
                 startForeground(NOTIF_ID, buildNotification("Kodra is running", b.port))
                 // Broadcast to Activity (if bound, it also polls)
@@ -89,7 +88,9 @@ class KodraService : Service() {
         server = null
         bound = null
         if (wakeLock?.isHeld == true) wakeLock?.release()
-        scope.launch { /* cancel children */ }.let { scope.coroutineContext[SupervisorJob]?.cancel() }
+        // Cancelling the parent job also stops an in-flight bootstrap install or a
+        // server hand-shake loop; the scope must not outlive the service.
+        job.cancel()
         super.onDestroy()
     }
 

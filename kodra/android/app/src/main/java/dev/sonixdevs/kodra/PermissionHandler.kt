@@ -1,7 +1,6 @@
 package dev.sonixdevs.kodra
 
 import android.Manifest
-import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -49,9 +48,4 @@ class PermissionHandler(private val activity: AppCompatActivity) {
         }
     }
 
-    fun checkAndPrompt(activity: Activity, onResult: (Boolean) -> Unit) {
-        val ok = hasAllFilesAccess()
-        if (!ok) requestAllFilesAccess()
-        onResult(ok)
-    }
 }

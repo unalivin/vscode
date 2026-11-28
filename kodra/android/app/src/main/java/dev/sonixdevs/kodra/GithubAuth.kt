@@ -5,7 +5,6 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.core.content.edit
-import java.io.File
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -23,21 +22,23 @@ import javax.crypto.spec.GCMParameterSpec
  * 4. Encrypt with AndroidKeyStore AES/GCM and store at filesDir/github-token (enc) + SharedPrefs iv
  * 5. Git credential helper + `github` auth provider (VS Code extension host) read via this helper
  *
- * Tokens never go in Logcat, SharedPrefs plain, or backup (see backup_rules.xml).
- * `local.properties` is ignored; CI reads `GITHUB_OAUTH_CLIENT_ID` env.
+ * The token is stored only as Keystore-encrypted ciphertext plus its IV. There is
+ * deliberately no plaintext copy on disk: anything that needs the token (git, the
+ * `github` provider) must go through [loadToken] inside this process. Nothing here
+ * is logged, and the token file path is excluded from backup by backup_rules.xml.
+ * `local.properties` is ignored; CI injects `GITHUB_OAUTH_CLIENT_ID` as a build field.
  */
 object GithubAuth {
     private const val PREF = "kodra_auth"
     private const val KEY_ALIAS = "kodra_github_token"
     private const val KS = "AndroidKeyStore"
-    private const val TOKEN_FILE = "github-token" // plaintext for helper shim in scaffold — real will be Keystore-wrapped
 
     fun getClientId(context: Context): String? {
         // 1. local.properties (dev)
         // 2. env fallback is build-time only — not runtime; for scaffold read SharedPrefs override
         val sp = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
         return sp.getString("gh_client_id", null)
-            ?: System.getenv("GITHUB_OAUTH_CLIENT_ID")
+            ?: BuildConfig.GITHUB_OAUTH_CLIENT_ID.takeIf { it.isNotEmpty() }
     }
 
     fun setClientId(context: Context, clientId: String) {
@@ -82,8 +83,6 @@ object GithubAuth {
     }
 
     fun storeToken(context: Context, token: String) {
-        // Scaffold: also write plaintext for GitBridge shim; real will store enc only
-        File(context.filesDir, TOKEN_FILE).writeText(token)
         val (enc, iv) = encrypt(context, token)
         context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit {
             putString("gh_token_enc", enc)
@@ -93,8 +92,10 @@ object GithubAuth {
 
     fun loadToken(context: Context): String? {
         val sp = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
-        val enc = sp.getString("gh_token_enc", null) ?: return File(context.filesDir, TOKEN_FILE).takeIf { it.exists() }?.readText()
+        val enc = sp.getString("gh_token_enc", null) ?: return null
         val iv = sp.getString("gh_token_iv", null) ?: return null
+        // A Keystore key can be invalidated (device lock change, restore to a new device);
+        // an unreadable token must behave like "signed out", not crash the caller.
         return runCatching { decrypt(context, enc, iv) }.getOrNull()
     }
 
@@ -102,6 +103,5 @@ object GithubAuth {
         context.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit {
             remove("gh_token_enc"); remove("gh_token_iv")
         }
-        File(context.filesDir, TOKEN_FILE).delete()
     }
 }

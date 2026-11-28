@@ -18,7 +18,8 @@ import com.google.android.material.button.MaterialButton
  * synthetic `KeyEvent`s to the WebView's `dispatchKeyEvent`. Ctrl/Alt are sticky
  * modifiers (toggle) — next key is sent with META_CTRL_ON / META_ALT_ON.
  *
- * Scaffold: UI wiring only; WebView must be `focusable` and `requestFocus()` before dispatch.
+ * Keys are synthesised with [KeyEvent] and dispatched to the WebView, so a hardware
+ * keyboard and this row take the same path through the workbench keybinding service.
  */
 class ExtraKeysView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
@@ -53,7 +54,7 @@ class ExtraKeysView @JvmOverloads constructor(
     fun attach(webView: WebView) { this.webView = webView }
 
     private fun addKey(label: String, keyCode: Int) {
-        row.addView(MaterialButton(context, null, com.google.android.material.R.attr.borderlessButtonStyle).apply {
+        row.addView(MaterialButton(context).apply {
             text = label
             setOnClickListener {
                 sendKey(keyCode)
@@ -64,7 +65,7 @@ class ExtraKeysView @JvmOverloads constructor(
     }
 
     private fun addToggle(label: String, onClick: (MaterialButton) -> Unit) {
-        row.addView(MaterialButton(context, null, com.google.android.material.R.attr.borderlessButtonStyle).apply {
+        row.addView(MaterialButton(context).apply {
             text = label
             setOnClickListener { onClick(this) }
         })

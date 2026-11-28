@@ -73,9 +73,10 @@ class FilePickerBridge(private val activity: AppCompatActivity) {
             val sd = "/storage/$type/$rel"
             if (java.io.File(sd).exists()) return sd
         }
-        // DownloadsProvider / MediaProvider — try _data
+        // DownloadsProvider / MediaProvider expose a real path through _data on the
+        // providers Kodra supports; anything else stays a content-only URI and is
+        // rejected rather than handed to the server as a bogus path.
         return queryDataColumn(context.contentResolver, uri)
-            ?: queryDisplayNameFallback(context, uri) // still content-only → null to force error
     }
 
     private fun queryDataColumn(cr: ContentResolver, uri: Uri): String? = runCatching {
@@ -86,8 +87,6 @@ class FilePickerBridge(private val activity: AppCompatActivity) {
             } else null
         }
     }.getOrNull()
-
-    private fun queryDisplayNameFallback(context: Context, uri: Uri): String? = null // explicit: no path → error
 
     private fun isExternalStorageDocument(uri: Uri) = "com.android.externalstorage.documents" == uri.authority
 

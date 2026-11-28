@@ -39,8 +39,10 @@ class ServerProcess(private val context: Context) {
             serverJs.absolutePath,
             "--host", "127.0.0.1",
             "--port", "0",
+            // The token file is the only credential. Passing
+            // --without-connection-token as well is a hard parse error in
+            // serverConnectionToken.ts, and would disable authentication anyway.
             "--connection-token-file", tokenFile.absolutePath,
-            "--without-connection-token", // we use file only; disable stdin token
             "--user-data-dir", File(context.filesDir, "user-data").absolutePath,
             "--extensions-dir", File(layout.prefix, "lib/node_modules/kodra-reh/extensions").absolutePath
         ).apply {

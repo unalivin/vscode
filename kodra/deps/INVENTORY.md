@@ -1,4 +1,4 @@
-# Bootstrap inventory — 2026-11-26
+# Bootstrap inventory (generated — do not edit)
 Generated from remote/package.json nativeBuild 24.22.1 @ https://nodejs.org/dist
 
 | package | version | class | notes |
